@@ -80,27 +80,23 @@ def calculate_exposure_time(A, SNR, T_atm, QE, dlambda, F0, m):
 lam = filters["B"]["center_nm"]
 N_photons = calculate_photon_count(
     math.pi * (0.3556 / 2) ** 2, 30 * 60, calculate_Tatm(lam),
-    calculate_QE(lam), filters["B"]["width_nm"], calculate_F0(lam), 14,
+    calculate_QE(lam), filters["B"]["width_nm"] * 1e-9, calculate_F0(lam), 14,
 )
 print(f"Shed telescope, B=14 star: SNR = {calculate_SNR_poisson(N_photons):.2f}")
-
-
 
 
 # The same source and integration time, but with the Elliot telescope.
 N_photons = calculate_photon_count(
     math.pi * (0.6096 / 2) ** 2, 30 * 60, calculate_Tatm(lam),
-    calculate_QE(lam), filters["B"]["width_nm"], calculate_F0(lam), 14,
+    calculate_QE(lam), filters["B"]["width_nm"] * 1e-9, calculate_F0(lam), 14,
 )
 print(f"Elliot telescope, B=14 star: SNR = {calculate_SNR_poisson(N_photons):.2f}")
-
-
 
 
 # An m_r' = 6.2 asteroid, observed in the r' filter with a shed telescope for 3 seconds.
 lam = filters["r'"]["center_nm"]
 N_photons = calculate_photon_count(
     math.pi * (0.3556 / 2) ** 2, 3, calculate_Tatm(lam),
-    calculate_QE(lam), filters["r'"]["width_nm"], calculate_F0(lam), 6.2,
+    calculate_QE(lam), filters["r'"]["width_nm"] * 1e-9, calculate_F0(lam), 6.2,
 )
 print(f"Shed telescope, r'=6.2 asteroid: SNR = {calculate_SNR_poisson(N_photons):.2f}")
