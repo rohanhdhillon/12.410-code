@@ -1,0 +1,13 @@
+@focus3 focus run.
+TheSkyX Build 14139
+Search step size: 400
+Initial exposure time: 0.5 seconds
+Samples per position: 1
+Temperature: 10.1C
+Filter Name: r'
+Filter Index: 3
+
+@focus3 sample 0, 0, @9796 = 0.489296
+@focus3 sample 1, 0, @10196 = 1.044224
+Too many saturated pixels.
+Shortening exposure to 0.2500  seconds and restarting a new focus run at the current position.

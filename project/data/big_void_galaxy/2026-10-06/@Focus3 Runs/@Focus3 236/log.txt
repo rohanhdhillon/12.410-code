@@ -1,0 +1,19 @@
+@focus3 focus run.
+TheSkyX Build 14139
+Search step size: 400
+Initial exposure time: 0.25 seconds
+Samples per position: 1
+Temperature: 10.1C
+Filter Name: r'
+Filter Index: 3
+
+@focus3 sample 0, 0, @9396 = 0.269492
+@focus3 sample 1, 0, @9796 = 0.329276
+@focus3 sample 2, 0, @10196 = 0.495434
+@focus3 sample 3, 0, @10596 = 0.644931
+@focus3 sample 4, 0, @10996 = 0.341540
+Approaching focus. Continuing search.
+@focus3 sample 4, 0, @11396 = 0.319109
+@focus3 successful.
+Moving to final position 10537.
+Final sharpness measure: 0.588072
