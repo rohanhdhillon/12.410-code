@@ -1,1 +1,4 @@
 *.fit
+.venv/
+__pycache__/
+project/reduction/
