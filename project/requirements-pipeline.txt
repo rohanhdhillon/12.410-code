@@ -2,3 +2,5 @@ astropy==8.0.2
 astroalign==2.6.2
 astrometry==4.3.0
 reproject==0.21.0
+photutils>=2.2,<4
+astroquery>=0.4.11,<0.5
