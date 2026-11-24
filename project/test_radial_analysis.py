@@ -2,6 +2,7 @@
 import json
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from unittest.mock import patch
 import numpy as np
@@ -47,6 +48,73 @@ class RadialAnalysisTests(unittest.TestCase):
         return ra.measure_annuli(self.frames,self.sky,red,np.zeros(self.shape,bool),
                                  self.g,self.cfg,[0.,10.,20.],self.errors)
 
+    def test_ugr_annuli_covariance_calibration_and_plot_labels(self):
+        import photometric_analysis as pa
+        import matplotlib.pyplot as plt
+        mapping = dict(g='u', r='g', i='r')
+        frames = {mapping[b]: frame for b, frame in self.frames.items()}
+        errors = {mapping[b]: path for b, path in self.errors.items()}
+        geometry = dict(self.g, bands='ugr')
+        red = np.zeros(self.shape, bool)
+        p = ra.measure_annuli(frames, self.sky, red, red, geometry, self.cfg, [0.,10.,20.], errors)
+        self.assertEqual(p['bands'], ('u','g','r'))
+        np.testing.assert_allclose(p['mean'], [[10.,10.],[20.,20.],[30.,30.]])
+        solutions = {b: dict(zp=z, color_term=c, pivot=.4, color_pair=pair,
+                            color_range=[-100.,100.], covariance=[[.01,0],[0,.0001]])
+                     for b,z,c,pair in [('u',24.,.2,['u','g']),('g',25.,.1,['g','r']),('r',24.5,.05,['g','r'])]}
+        m = ra.magnitude_profiles(p, solutions, self.cfg)
+        n = p['mean'].shape[1]; ids = [0,n,2*n]
+        expected, covariance = pa.sloan_magnitudes(p['mean'][:,0], p['covariance'][np.ix_(ids,ids)],
+                                                 solutions, bands='ugr')
+        np.testing.assert_allclose(m['magnitudes'][:,0], expected)
+        np.testing.assert_allclose(m['covariance'][np.ix_(ids,ids)], covariance)
+        table = ra.save_profiles(p,m,geometry,self.path/'ugr')
+        self.assertEqual(table.meta['bands'], ['u','g','r'])
+        self.assertEqual(set(table['band']), set('ugr'))
+        fig = ra.plot_profiles(table,self.path/'ugr/covariance.npz','m33',self.path/'ugr/plot.png')
+        labels = [line.get_label() for ax in fig.axes for line in ax.containers]
+        self.assertIn('u−g calibrated', labels)
+        self.assertIn('g−r calibrated', labels)
+        plt.close(fig)
+
+    def test_ugr_reference_growth_uses_r_not_the_middle_band(self):
+        edges = np.linspace(0,100,101); area = np.pi*np.diff(edges**2)
+        intensities = []
+        for h in (5.,3.,10.):
+            cumulative = 1-(1+edges/h)*np.exp(-edges/h)
+            intensities.append(np.diff(cumulative)/area)
+        valid = np.ones(100,bool); valid[:5] = False
+        means = np.asarray(intensities); means[:,~valid] = np.nan
+        V = np.eye(300)*1e-14
+        profile = dict(bands='ugr', edges=edges, mean=means, full_area=area,
+                       valid=valid, covariance=V, stat_covariance=V)
+        filled, _, _ = ra.reference_growth(profile,self.cfg)
+        self.assertAlmostEqual(ra._half_light(filled)[0]/10.,1.678,places=2)
+        self.assertTrue(np.isnan(profile['mean'][:,:5]).all())
+
+    def test_reference_geometry_survives_missing_other_bands_without_loosening_science(self):
+        frames = dict(u=self.frames['g'], g=self.frames['r'], r=self.frames['i'])
+        errors = dict(u=self.errors['g'], g=self.errors['r'], r=self.errors['i'])
+        frames['u']['mask'][:] = True
+        frames['g']['mask'][:] = True
+        geometry = dict(self.g,bands='ugr')
+        cfg = dict(self.cfg,growth_annuli=20,radius_uncertainty_draws=12,
+                   random_seed=1,growth_tail_fraction=.05)
+        sky = dict(self.sky,bands='ugr')
+        red = np.zeros(self.shape,bool)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            measured,growth = ra.determine_geometry(frames,sky,red,red,geometry,cfg,errors,.1,self.path)
+        self.assertEqual(growth['bands'], ('r',))
+        self.assertEqual(growth['covariance'].shape, (20,20))
+        self.assertEqual(measured['reference_minimum_annulus_fraction'], .5)
+        self.assertEqual(measured['reference_mask_bands'], ['r'])
+        self.assertGreater(measured['reference_usable_annuli'], 8)
+        self.assertAlmostEqual(measured['re_pixels'],25/np.sqrt(2),delta=.1)
+        science = ra.measure_annuli(frames,sky,red,red,geometry,cfg,measured['edges'],errors)
+        self.assertFalse(science['valid'].any())
+        self.assertEqual(cfg['minimum_annulus_fraction'], .6)
+
     def test_masked_mean_and_coherent_bound(self):
         p=self.profile()
         np.testing.assert_allclose(p['mean'],np.array([[10,10],[20,20],[30,30]]),atol=1e-12)
@@ -54,6 +122,33 @@ class RadialAnalysisTests(unittest.TestCase):
         self.assertLess(p['area'][0],p['full_area'][0])
         self.assertTrue(np.linalg.eigvalsh(p['covariance']).min()>-1e-10)
         self.assertGreater(p['covariance'][0,1],0)  # shared systematics persist between annuli
+
+    def test_per_galaxy_coverage_override_measures_remaining_pixels(self):
+        _, xx = np.indices(self.shape)
+        for frame in self.frames.values():
+            frame['mask'][:] = xx % 5 < 2  # Mask about 40% of each ring.
+        cfg = dict(self.cfg,minimum_annulus_fraction=.65)
+        red = np.zeros(self.shape,bool); edges = [0.,10.,20.,25.]
+        original = ra.measure_annuli(self.frames,self.sky,red,red,self.g,cfg,edges,self.errors)
+        self.assertFalse(original['valid'].any())
+        measured = ra.measure_annuli(self.frames,self.sky,red,red,
+                                    dict(self.g,minimum_annulus_fraction=.5),cfg,edges,self.errors)
+        self.assertTrue(measured['valid'].all())
+        np.testing.assert_allclose(measured['mean'], [[10.]*3,[20.]*3,[30.]*3])
+        self.assertEqual(cfg['minimum_annulus_fraction'], .65)
+        table = ra.save_profiles(measured,ra.magnitude_profiles(measured,{},cfg),self.g,self.path)
+        self.assertEqual(table.meta['minimum_annulus_fraction'], .5)
+        self.assertTrue(table['coverage_pass'].all())
+
+    def test_empty_plot_explains_coverage_rejection(self):
+        import matplotlib.pyplot as plt
+        red = np.ones(self.shape,bool)
+        p = ra.measure_annuli(self.frames,self.sky,red,red,self.g,self.cfg,[0.,10.,20.],self.errors)
+        table = ra.save_profiles(p,ra.magnitude_profiles(p,{},self.cfg),self.g,self.path)
+        fig = ra.plot_profiles(table,self.path/'covariance.npz','m33',self.path/'empty.png')
+        for ax in fig.axes:
+            self.assertTrue(any('No annuli pass 60% common coverage' in text.get_text() for text in ax.texts))
+        plt.close(fig)
 
     def test_partial_calibration_dependencies(self):
         p=self.profile()
@@ -63,6 +158,8 @@ class RadialAnalysisTests(unittest.TestCase):
         m=ra.magnitude_profiles(p,s,self.cfg)
         np.testing.assert_allclose(m['magnitudes'][0],m['instrumental'][0]+25)
         self.assertTrue(np.isnan(m['magnitudes'][2]).all())
+        s['g']['provisional_flat_uncertainty'] = True
+        self.assertIn('assumed external-flat uncertainty', ra.magnitude_profiles(p,s,self.cfg)['status']['g'])
         missing=dict(r=solution(24,-1,['g','r']),i=solution(23,-1,['r','i']))
         self.assertTrue(np.isnan(ra.magnitude_profiles(p,missing,self.cfg)['magnitudes']).all())
 
@@ -99,10 +196,14 @@ class RadialAnalysisTests(unittest.TestCase):
                  minimum_sky_boxes=12,sky_source_dilation_pixels=2,
                  sky_bootstrap_block_pixels=64,sky_bootstrap_draws=80,
                  sky_exclusion_sensitivity_factors=[1.05],random_seed=1)
-        sky=ra.fit_sky(frames,np.zeros(shape,bool),geometry,cfg,self.path)
-        np.testing.assert_allclose(sky['coefficients'],np.tile([2,.3,-.1],(3,1)),atol=.01)
-        self.assertTrue(np.linalg.eigvalsh(sky['covariance']).min()>-1e-12)
-        self.assertGreater(sky['covariance'][0,3],0)
+        for order in ('gri', 'ugr'):
+            band_frames = {b: frame for b, frame in zip(order, frames.values())}
+            sky=ra.fit_sky(band_frames,np.zeros(shape,bool),dict(geometry,bands=order),cfg,self.path/order)
+            self.assertEqual(sky['bands'], list(order))
+            self.assertTrue(set(order) <= set(sky['boxes'].colnames))
+            np.testing.assert_allclose(sky['coefficients'],np.tile([2,.3,-.1],(3,1)),atol=.01)
+            self.assertTrue(np.linalg.eigvalsh(sky['covariance']).min()>-1e-12)
+            self.assertGreater(sky['covariance'][0,3],0)
 
     def test_reference_model_does_not_unmask_science_bins(self):
         edges=np.linspace(0,100,101); h=10.
@@ -138,6 +239,11 @@ class RadialAnalysisTests(unittest.TestCase):
             updated=ra.foreground_extinction(self.frames['r'],self.g,changed,self.path/'dust.json')
             self.assertAlmostEqual(updated['extinction'][0],.4)
             self.assertEqual(query.call_count,4)
+        ugr = ra.foreground_extinction(self.frames['r'], dict(self.g,bands='ugr'),
+                                      dict(self.cfg,extinction_coefficients=dict(u=4.239,g=3.303,r=2.285)),
+                                      self.path/'dust.json')
+        self.assertEqual(ugr['bands'], ('u','g','r'))
+        np.testing.assert_allclose(ugr['extinction'], [.4239,.3303,.2285])
         np.testing.assert_allclose(dust['extinction'],[.3303,.2285,.1698])
         V=np.asarray(dust['covariance']); sigma=.016
         self.assertAlmostEqual(V[0,0]+V[1,1]-2*V[0,1],(3.303-2.285)**2*sigma**2)

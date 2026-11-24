@@ -345,6 +345,42 @@ def image_cone(frame):
     return center,float(np.max(center.separation(corners).deg))
 
 
+def sdss_query_json(query, cfg):
+    """Query the native SkyServer API when its older CSV web page fails."""
+    import requests
+    release = int(cfg['sdss_release'])
+    url = f'https://skyserver.sdss.org/dr{release}/SkyServerWS/SearchTools/SqlSearch'
+    response = requests.get(url, params={'cmd': query, 'format': 'json'},
+                            timeout=cfg['catalog_timeout_seconds'])
+    response.raise_for_status()
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError(f'SDSS JSON endpoint returned non-JSON content: {response.text[:250]}') from exc
+    if not isinstance(payload, list):
+        raise RuntimeError(f'SDSS query error: {str(payload)[:350]}')
+    # SqlQuery is a separate metadata table, not a set of catalog objects.
+    result = next((part for part in payload if isinstance(part, dict)
+                   and part.get('TableName') == 'Table1'), None)
+    if result is None or not isinstance(result.get('Rows'), list):
+        raise RuntimeError(f'SDSS response has no catalog result table: {str(payload)[:350]}')
+    rows = result['Rows']
+    if not rows:
+        return None
+    required = ('objID','ra','dec','type','clean','u','g','r','i','eu','eg','er','ei',
+                'z','zWarning','specclass')
+    if any(not isinstance(row, dict) or not set(required) <= row.keys() for row in rows):
+        raise RuntimeError('SDSS JSON result is missing expected photometry columns.')
+    table = Table()
+    # Never pass 64-bit object IDs through floats, even when combining CSV/JSON tiles.
+    table['objID'] = np.array([row['objID'] for row in rows], dtype=np.uint64)
+    for name in required[1:]:
+        values = [row[name] for row in rows]
+        table[name] = ([str(value or '') for value in values] if name == 'specclass'
+                       else np.array([np.nan if value is None else value for value in values], dtype=float))
+    return table
+
+
 def sdss_catalog(frame, cfg):
     """Native SDSS PSF magnitudes, observed rather than dereddened.
 
@@ -356,39 +392,58 @@ def sdss_catalog(frame, cfg):
     center,radius=image_cone(frame)
     step=cfg['sdss_tile_arcmin']/60
     offsets=np.arange(-radius,radius+step,step)
-    tiles=[]
+    tiles=[]; use_json=False
     for north in offsets:
         for east in offsets:
             position=center.spherical_offsets_by(east*u.deg,north*u.deg)
             cone=step*np.sqrt(2)/2*60+cfg['catalog_cone_margin_arcmin']
             query=f"""SELECT p.objID, p.ra, p.dec, p.type, p.clean,
-              p.psfMag_g AS g, p.psfMag_r AS r, p.psfMag_i AS i,
-              p.psfMagErr_g AS eg, p.psfMagErr_r AS er, p.psfMagErr_i AS ei,
+              p.psfMag_u AS u, p.psfMag_g AS g, p.psfMag_r AS r, p.psfMag_i AS i,
+              p.psfMagErr_u AS eu, p.psfMagErr_g AS eg, p.psfMagErr_r AS er, p.psfMagErr_i AS ei,
               s.z, s.zWarning, s.class AS specclass
               FROM dbo.fGetNearbyObjEq({position.ra.deg},{position.dec.deg},{cone}) n
               JOIN PhotoObj p ON n.objID=p.objID
               LEFT JOIN SpecObj s ON s.bestObjID=p.objID
               WHERE p.mode=1"""
-            table=SDSS.query_sql(query,data_release=cfg['sdss_release'],cache=True)
+            if not use_json:
+                try:
+                    table=SDSS.query_sql(query,data_release=cfg['sdss_release'],cache=True)
+                    if table is not None and not {'objID','ra','dec','u','eu','g','r','i'} <= set(table.colnames):
+                        raise ValueError('SDSS CSV response lacks the requested photometry columns.')
+                except Exception as exc:
+                    warnings.warn(f'SDSS CSV lookup failed ({type(exc).__name__}); '
+                                  'retrying through the native SDSS JSON API.', stacklevel=2)
+                    use_json=True
+            if use_json:
+                # Stay on JSON for the remaining tiles, avoiding cached HTML error pages.
+                table=sdss_query_json(query,cfg)
             if table is not None and len(table):tiles.append(table)
     if not tiles:raise ValueError('No SDSS coverage/reference objects in this footprint.')
     table=unique(vstack(tiles,metadata_conflicts='silent'),keys='objID')
     x,y=frame['wcs'].world_to_pixel(SkyCoord(column(table,'ra'),column(table,'dec'),unit='deg'))
     ny,nx=frame['data'].shape
-    return table[(x>=0)&(x<nx)&(y>=0)&(y<ny)]
+    table = table[(x>=0)&(x<nx)&(y>=0)&(y<ny)]
+    table.meta['sdss_transport'] = 'SkyServer JSON fallback' if use_json else 'Astroquery CSV'
+    return table
 
 
-def reference_catalog(frame, cfg, cache):
+def reference_catalog(frame, cfg, cache, *, bands='gri'):
     """Prefer SDSS; a clearly labeled APASS Sloan g'r'i' fallback is opt-in."""
     cache=Path(cache);cache.parent.mkdir(parents=True,exist_ok=True)
     if cache.exists():
-        table=Table.read(cache);return table,str(table.meta['catalog'])
+        table=Table.read(cache)
+        if all(b in table.colnames and 'e'+b in table.colnames for b in bands):
+            return table,str(table.meta['catalog'])
+        warnings.warn(f"Refreshing {cache.name}: missing requested {bands} reference columns.")
     try:
         table=sdss_catalog(frame,cfg)
         count=np.sum((column(table,'type')==6)&(column(table,'clean')==1))
         if count<cfg['minimum_catalog_stars']:raise ValueError(f'Only {count} SDSS point-source standards.')
         name=f"SDSS DR{cfg['sdss_release']} native ugriz PSF photometry"
     except Exception as exc:
+        if 'u' in bands:
+            raise RuntimeError('M33 u/g/r calibration requires native SDSS u magnitudes; '
+                               f'APASS has no u band. SDSS lookup failed: {exc}') from exc
         if not cfg['allow_apass_fallback']:raise
         warnings.warn(f'SDSS unavailable/insufficient ({exc}); trying the enabled APASS Sloan fallback.',stacklevel=2)
         from astroquery.vizier import Vizier
@@ -424,7 +479,7 @@ def reference_catalog(frame, cfg, cache):
 
 
 def fit_color_response(xx, yy, err, cfg):
-    """Fit a stellar zero point/color term, testing leverage through slope precision."""
+    """Inverse-variance fit; retain a color term detected at >=1.5 sigma by default."""
     xx=np.asarray(xx,float);yy=np.asarray(yy,float);err=np.asarray(err,float)
     pivot=float(np.median(xx));span=float(np.percentile(xx,90)-np.percentile(xx,10))
     can_color=(len(xx)>=cfg['minimum_color_stars']) and np.ptp(xx)>0 and cfg['fit_color_terms']
@@ -432,6 +487,7 @@ def fit_color_response(xx, yy, err, cfg):
         design=np.column_stack([np.ones(len(xx)),xx-pivot]) if use_color else np.ones((len(xx),1))
         keep=np.ones(len(xx),bool)
         for _ in range(cfg['zp_clip_iterations']):
+            # More precise catalog + instrumental magnitudes carry more weight.
             w=1/err[keep]**2;normal=design[keep].T@(w[:,None]*design[keep])
             covariance=np.linalg.inv(normal);beta=covariance@(design[keep].T@(w*yy[keep]))
             residual=yy-design@beta
@@ -449,10 +505,7 @@ def fit_color_response(xx, yy, err, cfg):
     status='zero point only: color fit disabled or too few distinct-color standards'
     if len(beta)==2:
         slope_error=float(np.sqrt(cov[1,1]))
-        if slope_error>cfg.get('maximum_color_term_error',0.1):
-            beta,cov,keep,residual=solve(False)
-            status='zero point only: color slope insufficiently constrained'
-        elif abs(beta[1])<cfg['color_term_significance']*slope_error:
+        if abs(beta[1])<cfg.get('color_term_significance',1.5)*slope_error:
             beta,cov,keep,residual=solve(False)
             status='zero point only: color slope not significant'
         else:
@@ -483,7 +536,9 @@ def fit_zero_points(frames, psfs, catalogs, cfg, output):
             catalog_mag=column(cat,band);catalog_error=column(cat,'e'+band)
             accepted=(column(cat,'type')==6)&(column(cat,'clean')==1)
             accepted &= np.isfinite(catalog_mag)&np.isfinite(catalog_error)&np.isfinite(color)
-            accepted &= (catalog_error>0)&(catalog_error<cfg['max_catalog_error'])
+            error_limit = cfg.get('catalog_error_overrides', {}).get(galaxy, {}).get(band, cfg['max_catalog_error'])
+            counts['catalog_error_limit_mag'] = error_limit
+            accepted &= (catalog_error>0)&(catalog_error<error_limit)
             accepted &= (catalog_mag>cfg['catalog_magnitude_range'][0])&(catalog_mag<cfg['catalog_magnitude_range'][1])
             accepted &= distance*frame['scale']<cfg['catalog_match_arcsec']
             accepted &= (x>=0)&(x<nx)&(y>=0)&(y<ny)
@@ -537,7 +592,9 @@ def fit_zero_points(frames, psfs, catalogs, cfg, output):
                 color_term_error=float(np.sqrt(covariance[1,1])),
                 color_range=[float(xx[keep].min()),float(xx[keep].max())],catalog=str(cat.meta['catalog']),
                 aperture_noise_status='conservative bound' if frame['psf_matched'] else 'blank-aperture inflation at stellar scale; coherent calibration systematics excluded',
-                provisional_weak_g_flat=(galaxy=='m33' and band=='g'))
+                provisional_weak_g_flat=bool(frame['header'].get('FLATLOW', False)),
+                provisional_flat_uncertainty=bool(frame['header'].get('FLATPROV', False)),
+                provisional_band_mapping=bool(frame['header'].get('BANDMAP', False)))
             counts['reason']='calibrated';counts['fitted_standards']=int(keep.sum())
             table['accepted']=keep;table['m_calibrated']=table['m_inst']+beta[0]+coefficient*(xx-pivot)
             table['residual_mag']=table['m_catalog']-table['m_calibrated']
@@ -548,35 +605,38 @@ def fit_zero_points(frames, psfs, catalogs, cfg, output):
     return solutions,measurements
 
 
-def sloan_magnitudes(flux, flux_covariance, solutions, calibration_covariance=None):
-    """Calibrate net COMMON-aperture g/r/i fluxes, including coupled color terms.
+def sloan_magnitudes(flux, flux_covariance, solutions, calibration_covariance=None, *, bands='gri'):
+    """Calibrate net common-aperture fluxes in the specified band order, including coupled color terms.
 
     Fluxes are extended-source aperture fluxes in ADU/s: do not apply a stellar
     aperture correction to a galaxy region. flux_covariance must include sky and
-    aperture correlations. Calibration covariance order is Zg,Cg,Zr,Cr,Zi,Ci.
+    aperture correlations. Calibration covariance alternates ZP,C in the specified band order.
     Catalog and passband systematics are separate from these formal errors.
     """
-    missing=set('gri')-set(solutions)
-    if missing:raise ValueError(f"Cannot calibrate joint g/r/i magnitudes; missing zero points: {sorted(missing)}. Raw aperture flux analysis remains available.")
+    missing=set(bands)-set(solutions)
+    if missing:raise ValueError(f"Cannot calibrate joint magnitudes; missing zero points: {sorted(missing)}. Raw aperture flux analysis remains available.")
+    bands = tuple(bands)
+    if len(bands) != 3 or len(set(bands)) != 3:
+        raise ValueError('Specify three distinct bands in flux/covariance order.')
     flux=np.asarray(flux,float);V=np.asarray(flux_covariance,float)
-    if flux.shape!=(3,) or V.shape!=(3,3):raise ValueError('Supply g,r,i fluxes and a 3x3 covariance.')
+    if flux.shape!=(3,) or V.shape!=(3,3):raise ValueError('Supply three fluxes in the specified band order and a 3x3 covariance.')
     if np.any(flux<=0):raise ValueError('Non-positive flux: report a flux/upper limit, not a logarithmic magnitude.')
     color_matrix=np.zeros((3,3));Z=[];C=[];pivot=[]
-    for j,b in enumerate('gri'):
+    for j,b in enumerate(bands):
         sol=solutions[b];Z.append(sol['zp']);C.append(sol['color_term']);pivot.append(sol['pivot'])
-        a,c=sol['color_pair'];color_matrix[j,'gri'.index(a)]=1;color_matrix[j,'gri'.index(c)]=-1
+        a,c=sol['color_pair'];color_matrix[j,bands.index(a)]=1;color_matrix[j,bands.index(c)]=-1
     A=np.eye(3)-np.diag(C)@color_matrix;inv=np.linalg.inv(A)
     magnitude=inv@(-2.5*np.log10(flux)+Z-np.asarray(C)*pivot)
     jac_flux=inv@np.diag(-2.5/np.log(10)/flux)
     if calibration_covariance is None:
         calibration_covariance=np.zeros((6,6))
-        for j,b in enumerate('gri'):calibration_covariance[2*j:2*j+2,2*j:2*j+2]=solutions[b]['covariance']
+        for j,b in enumerate(bands):calibration_covariance[2*j:2*j+2,2*j:2*j+2]=solutions[b]['covariance']
     jac_cal=np.zeros((3,6))
     for j in range(3):
         jac_cal[:,2*j]=inv[:,j]
         jac_cal[:,2*j+1]=inv[:,j]*(color_matrix[j]@magnitude-pivot[j])
     covariance=jac_flux@V@jac_flux.T+jac_cal@calibration_covariance@jac_cal.T
-    for j,b in enumerate('gri'):
+    for j,b in enumerate(bands):
         low,high=solutions[b]['color_range']
         if not low<=color_matrix[j]@magnitude<=high:
             warnings.warn(f'{b}: aperture color lies outside the calibration-star range; color correction is extrapolated.')

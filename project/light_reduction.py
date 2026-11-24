@@ -202,13 +202,72 @@ def numeric_gain(headers, cfg):
     return float(np.median(values)) if values else None
 
 
+def install_external_flat(setup, source, band, *, fractional_floor=0.01,
+                          minimum_signal=5884.0, bad_columns=(0,)):
+    """Install an already bias-subtracted, normalized master; never treat it as raw.
+
+    The fractional floor is an assumed sensitivity bound, not a measured error.
+    minimum_signal is the lowest bias-subtracted input median recorded in HISTORY.
+    """
+    source = Path(source)
+    flat = load(source); header = fits.getheader(source)
+    if flat.shape != tuple(setup["shape"]):
+        raise ValueError(f"External flat shape mismatch: {source}")
+    for field in ("TELESCOP", "INSTRUME", "XBINNING", "YBINNING", "XORGSUBF",
+                  "YORGSUBF", "SET-TEMP"):
+        if header.get(field) != setup["reference"].get(field):
+            raise ValueError(f"External flat {field} mismatch: {source}")
+    if header["FILTER"].replace("'", "") != band.replace("'", ""):
+        raise ValueError(f"External flat filter mismatch: {source}")
+    if not header.get("MASTER") or not header.get("BIASFILE") or header.get("NORMTYPE") != "MEDIAN":
+        raise ValueError("External flat must document master, bias subtraction, and normalization.")
+    if not np.isfinite(flat).all() or not np.isclose(np.median(flat), 1, atol=1e-5):
+        raise ValueError("External flat must be finite and median-normalized.")
+    if fractional_floor <= 0 or minimum_signal <= 0 or header["NCOMBINE"] < 2:
+        raise ValueError("External flat uncertainty settings must be positive.")
+    spec = dict(source=str(source), fractional_floor=fractional_floor,
+                minimum_signal=minimum_signal, bad_columns=list(bad_columns),
+                ncombine=int(header["NCOMBINE"]))
+    key = signature([source], spec)
+    safe_band = "".join(c for c in band if c.isalnum())
+    target = setup["output_dir"] / f"master_flat_{safe_band}.fit"
+    if not cached(target, key, True):
+        header["ORIGFILT"] = header["FILTER"]
+        header["FILTER"], header["BUNIT"] = band, "relative"
+        header["BIASCOR"], header["FLTNORM"], header["DARKCOR"] = True, True, False
+        header["FLATLOW"], header["FLATPROV"] = False, True
+        header["RDMISS"] = header.get("READOUTM") is None
+        header["RUNKEY"], header["SRCFILE"] = key, source.name
+        header.add_history("Supplied normalized master; no additional bias subtraction.")
+        header.add_history("External-flat uncertainty is modeled, not measured from raw inputs.")
+        fits.writeto(target, flat, header, overwrite=True)
+    setup["flat_files"][band] = target
+    setup["low_signal_flats"].discard(band)
+    setup.setdefault("external_flats", {})[band] = spec
+    return target
+
+
+def external_flat_variance(flat, spec, gain, read_noise):
+    """Median-stack noise approximation plus an explicit shared fractional floor.
+
+    The external bias differs from the science bias: its unknown uncertainty and
+    illumination/normalization errors are represented only by the assumed floor.
+    """
+    signal = spec["minimum_signal"]
+    return (np.pi / (2 * spec["ncombine"]) *
+            (np.maximum(flat, 0) * signal / gain + read_noise**2) / signal**2
+            + (spec["fractional_floor"] * flat)**2).astype(np.float32)
+
+
 def calibration_models(setups, root, cfg):
     """Estimate temporal noise and linearized uncertainty of the measured masters."""
     models = {}
     for name, setup in setups.items():
         paths = setup["bias_paths"] + setup["flat_paths"]
         key = signature(paths + [setup["output_dir"] / "master_bias.fit"]
-                        + list(setup["flat_files"].values()), calibration_parameters(cfg))
+                        + list(setup["flat_files"].values()),
+                        dict(calibration_parameters(cfg), external_flats=setup["external_flats"])
+                        if setup.get("external_flats") else calibration_parameters(cfg))
         folder = root / "uncertainty" / name; folder.mkdir(parents=True, exist_ok=True)
         metadata = folder / "model.json"
         if cfg["reuse"] and metadata.exists():
@@ -241,7 +300,7 @@ def calibration_models(setups, root, cfg):
         estimates = []
         if gain is None:
             for band, flat_paths in setup["flat_groups"].items():
-                if band in setup["low_signal_flats"]:
+                if band in setup["low_signal_flats"] or band in setup.get("external_flats", {}):
                     continue
                 # Use many independent pixels and disjoint pairs, with an illumination correction.
                 for p1, p2 in zip(flat_paths[::2], flat_paths[1::2]):
@@ -268,31 +327,40 @@ def calibration_models(setups, root, cfg):
                      bias_file=str(bias_file), flats={}, products=[str(bias_file)])
         for band, flat_paths in setup["flat_groups"].items():
             flat = load(setup["flat_files"][band]); scales, samples = [], []
-            for path in flat_paths:
-                raw = load(path)
-                valid = np.isfinite(raw) & (raw < cfg["saturation_adu"])
-                raw -= bias; valid &= raw > 0
-                scales.append(float(np.median(raw[valid])))
-                samples.append(raw[::cfg["normalization_stride"], ::cfg["normalization_stride"]].copy()/scales[-1])
-            # Recover the normalization applied when the existing master was written.
-            sample = np.stack(samples)
-            sample_median = np.median(sample, axis=0)
-            sample_flat = flat[::cfg["normalization_stride"], ::cfg["normalization_stride"]]
-            good = np.isfinite(sample_flat) & (sample_flat > 0)
-            normalization = float(np.median(sample_median[good] / sample_flat[good]))
-            alpha = float(np.median(1/np.asarray(scales)) / normalization)
-            vf = np.empty(shape, np.float32)
-            with ExitStack() as stack:
-                hdus = [stack.enter_context(fits.open(p, memmap=False)) for p in flat_paths]
-                for rows in slices(shape, cfg["chunk_rows"]):
-                    strips = []
-                    for h, scale in zip(hdus, scales):
-                        raw = h[0].section[rows, :].astype(np.float32)
-                        raw[(~np.isfinite(raw)) | (raw >= cfg["saturation_adu"])] = np.nan
-                        strips.append((raw-bias[rows])/scale/normalization)
-                    cube = np.stack(strips)
-                    vf[rows] = np.pi/(2*len(flat_paths)) * np.nanvar(cube, axis=0, ddof=1)
-            vf[~np.isfinite(flat)] = np.nan
+            external = setup.get("external_flats", {}).get(band)
+            if external:
+                # Independent external master: no covariance with the science master bias.
+                alpha, normalization = 0.0, 1.0
+                vf = external_flat_variance(flat, external, gain, rn)
+                warnings.warn(f"{name} {band}: supplied master has no measured variance; "
+                              f"using modeled noise plus assumed {external['fractional_floor']:.1%} "
+                              "shared flat uncertainty (provisional).")
+            else:
+                for path in flat_paths:
+                    raw = load(path)
+                    valid = np.isfinite(raw) & (raw < cfg["saturation_adu"])
+                    raw -= bias; valid &= raw > 0
+                    scales.append(float(np.median(raw[valid])))
+                    samples.append(raw[::cfg["normalization_stride"], ::cfg["normalization_stride"]].copy()/scales[-1])
+                # Recover the normalization applied when the existing master was written.
+                sample = np.stack(samples)
+                sample_median = np.median(sample, axis=0)
+                sample_flat = flat[::cfg["normalization_stride"], ::cfg["normalization_stride"]]
+                good = np.isfinite(sample_flat) & (sample_flat > 0)
+                normalization = float(np.median(sample_median[good] / sample_flat[good]))
+                alpha = float(np.median(1/np.asarray(scales)) / normalization)
+                vf = np.empty(shape, np.float32)
+                with ExitStack() as stack:
+                    hdus = [stack.enter_context(fits.open(p, memmap=False)) for p in flat_paths]
+                    for rows in slices(shape, cfg["chunk_rows"]):
+                        strips = []
+                        for h, scale in zip(hdus, scales):
+                            raw = h[0].section[rows, :].astype(np.float32)
+                            raw[(~np.isfinite(raw)) | (raw >= cfg["saturation_adu"])] = np.nan
+                            strips.append((raw-bias[rows])/scale/normalization)
+                        cube = np.stack(strips)
+                        vf[rows] = np.pi/(2*len(flat_paths)) * np.nanvar(cube, axis=0, ddof=1)
+                vf[~np.isfinite(flat)] = np.nan
             # PDF diagnostic: scatter of 500 aperture means, in unbinned-pixel sizes.
             size = max(1, int(round(cfg["flat_aperture_unbinned"]["e24" if name.startswith("e24") else "refractor"]
                                    / setup["reference"]["XBINNING"])))
@@ -308,10 +376,19 @@ def calibration_models(setups, root, cfg):
             fh = fits.Header(dict(RUNKEY=key, FILTER=band, NCOMBINE=len(flat_paths),
                                   FLATLOW=band in setup["low_signal_flats"], BIASALPH=alpha,
                                   APVAR=aperture_variance, APNUM=cfg["flat_apertures"], APSIZE=size))
-            fh.add_history("VAR is repeat-flat variance of a median, conditional on the master bias.")
+            if external:
+                fh["NCOMBINE"] = external["ncombine"]
+                fh["FLATPROV"], fh["FLTFLOOR"] = True, external["fractional_floor"]
+                fh["SRCFILE"] = Path(external["source"]).name
+                fh["MINSIG"] = external["minimum_signal"]
+                fh["ERRMODEL"] = "PHOTON+ASSUMED_FLOOR"
+                fh.add_history("VAR: modeled median photon/read noise plus assumed shared fractional floor.")
+                fh.add_history("External bias, illumination, normalization errors unmeasured; floor is a sensitivity assumption.")
+            else:
+                fh.add_history("VAR is repeat-flat variance of a median, conditional on the master bias.")
             fh.add_history("APVAR is spatial aperture scatter, not treated as random measurement noise.")
             write_images(flat_file, {"VAR": vf}, fh)
-            model["flats"][band] = dict(file=str(flat_file), alpha=alpha, normalization=normalization,
+            model["flats"][band] = dict(file=str(flat_file), alpha=alpha, external=bool(external), normalization=normalization,
                                           aperture_variance=aperture_variance)
             model["products"].append(str(flat_file))
             del flat, vf
@@ -338,12 +415,19 @@ def calibrate_exposures(setups, models, root, cfg):
                 weak = band in setup["low_signal_flats"]
                 if weak and not cfg["allow_weak_m33_g"]:
                     continue
-                key = signature([source, flat_path, setup["output_dir"] / "master_bias.fit", fm["file"], model["bias_file"]], calibration_parameters(cfg))
-                output = root / "calibrated" / name / f"{source.stem}.fit"
+                physical_band = setup.get("band_map", {}).get(band, band.replace("'", ""))
+                parameters = calibration_parameters(cfg)
+                if setup.get("band_map"):
+                    parameters = dict(parameters, band_map=setup["band_map"])
+                key = signature([source, flat_path, setup["output_dir"] / "master_bias.fit", fm["file"], model["bias_file"]], parameters)
+                reduction_setup = name + setup.get("reduction_suffix", "")
+                output = root / "calibrated" / reduction_setup / f"{source.stem}.fit"
                 record = dict(source=str(source), calibrated=str(output), setup=name,
                               galaxy="ngc6503" if name.startswith("e24") else "m33",
-                              band=band.replace("'", ""), weak_flat=weak, key=key)
-                registered_cache = root / "registered" / name / f"{source.stem}.fit"
+                              band=physical_band, raw_band=band.replace("'", ""),
+                              reduction_setup=reduction_setup, product_prefix=setup.get("product_prefix"),
+                              weak_flat=weak, key=key)
+                registered_cache = root / "registered" / reduction_setup / f"{source.stem}.fit"
                 already_registered = (cfg["reuse"] and registered_cache.exists()
                                       and fits.getheader(registered_cache).get("CALKEY") == key
                                       and fits.getheader(registered_cache).get("GRIDHASH") == grid_signature(cfg))
@@ -357,12 +441,25 @@ def calibrate_exposures(setups, models, root, cfg):
                         db = (-1/flat + signal*fm["alpha"]/flat**2)/t
                         df = -signal/(flat**2*t)
                         cs = np.sqrt(db**2*vb + df**2*vf)
+                    external = setup.get("external_flats", {}).get(band)
+                    if external:
+                        invalid |= (flat < 0.5) | (flat > 1.5)
+                        invalid[:, external["bad_columns"]] = True
                     invalid |= ~np.isfinite(data) | ~np.isfinite(vi) | ~np.isfinite(cs)
                     for a in (data, vi, cs):a[invalid] = np.nan
                     h["BUNIT"], h["RUNKEY"], h["BIASCOR"], h["FLATCOR"] = "adu/s", key, True, True
                     h["DARKCOR"], h["MASKCOR"], h["FLATLOW"] = False, True, weak
                     h["GAIN"], h["GAINSRC"], h["RNADU"] = model["gain"], model["gain_source"], model["read_noise_adu"]
                     h["RDMISS"] = setup["missing_readout"]
+                    if setup.get("band_map"):
+                        h["RAWFILT"], h["FILTER"] = band, physical_band
+                        h["BANDMAP"] = (True, "Inferred M33 filter mapping")
+                        h.add_history(f"Inferred filter mapping: raw {band} -> {physical_band}; raw file untouched.")
+                    h["FLATPROV"] = bool(fm.get("external", False))
+                    if fm.get("external", False):
+                        h["FLTFLOOR"] = external["fractional_floor"]
+                        h["FLATSRC"] = Path(external["source"]).name
+                        h.add_history("External flat: independent bias; modeled noise plus assumed shared floor.")
                     h["VARAPPRO"], h["NORMCOV"] = True, False
                     h.add_history("Linearized median-master errors; normalization/gain-fit uncertainty not included.")
                     if weak:h.add_history("WARNING: weak M33 g flat explicitly used provisionally; inspect large flat errors.")
@@ -414,8 +511,8 @@ def register_exposures(records, root, project_dir, cfg, keep_calibrated=False):
             anchor_wcs = WCS(fits.getheader(project_dir / "ngc6503_g.wcs.fits"))
             stars = extract_stars(source, cfg)
         else:
-            # r 1x1 has the finest sampling and avoids the weak g flat for the anchor solve.
-            source = Path(next(r["source"] for r in subset if r["setup"] == "refractor_1x1" and r["band"] == "r"))
+            # The raw-label r 1x1 frame (physical g for M33) retains the established sky grid.
+            source = Path(next(r["source"] for r in subset if r["setup"] == "refractor_1x1" and r.get("raw_band", r["band"]) == "r"))
             anchor_wcs, stars = solve_anchor(source, wcs_folder / "m33_anchor.fits", cfg)
         h = fits.getheader(source)
         shape = (h["NAXIS2"], h["NAXIS1"])
@@ -429,11 +526,12 @@ def register_exposures(records, root, project_dir, cfg, keep_calibrated=False):
             shape = (ymax-ymin, xmax-xmin)
         # All bands of a galaxy share this one reference sky grid and pixel area.
         anchors[galaxy] = (anchor_wcs, stars, grid_wcs, shape)
-        fits.PrimaryHDU(header=grid_wcs.to_header(relax=True)).writeto(wcs_folder / f"{galaxy}_grid.fits", overwrite=True)
+        grid_prefix = subset[0].get("product_prefix") or galaxy
+        fits.PrimaryHDU(header=grid_wcs.to_header(relax=True)).writeto(wcs_folder / f"{grid_prefix}_grid.fits", overwrite=True)
     registered = []
     for record in records:
         source = Path(record["source"]); anchor_wcs, anchor_stars, grid_wcs, shape = anchors[record["galaxy"]]
-        output = root / "registered" / record["setup"] / f"{source.stem}.fit"
+        output = root / "registered" / record.get("reduction_setup", record["setup"]) / f"{source.stem}.fit"
         key = signature([source, project_dir / "ngc6503_g.wcs.fits"]
                         + ([wcs_folder / "m33_anchor.fits"] if record["galaxy"] == "m33" else []),
                         dict(cfg, calibration_key=record["key"]))
@@ -465,14 +563,16 @@ def register_exposures(records, root, project_dir, cfg, keep_calibrated=False):
                 write_images(output, {"SCI": aligned, "VARIND": vi, "CALSIG": c}, h)
             sh = source_wcs.to_header(relax=True); sh["SOURCE"] = source.name
             sh["WCSRMS"], sh["WCSMATCH"] = rms, matches
-            fits.PrimaryHDU(header=sh).writeto(wcs_folder / f"{source.stem}.fits", overwrite=True)
+            wcs_suffix = "_ugr" if record.get("product_prefix") else ""
+            fits.PrimaryHDU(header=sh).writeto(wcs_folder / f"{source.stem}{wcs_suffix}.fits", overwrite=True)
             del aligned, variance, cs, vi, c, data, footprint, good
         h = fits.getheader(output)
         if not keep_calibrated:
             Path(record["calibrated"]).unlink(missing_ok=True)
         registered.append(dict(record, registered=str(output), rms=h["WCSRMS"], matches=h["WCSMATCH"]))
         print(f"Registered {source.name}: {h['WCSMATCH']} stars, RMS {h['WCSRMS']:.3f} native pixels", flush=True)
-    (root / "registration.json").write_text(json.dumps(registered, indent=2)+"\n")
+    manifest = "registration_ugr.json" if any(r.get("product_prefix") for r in records) else "registration.json"
+    (root / manifest).write_text(json.dumps(registered, indent=2)+"\n")
     return registered
 
 
@@ -526,7 +626,8 @@ def stack_exposures(records, root, cfg, keep_registered_noise=False):
         # Compaction changes storage, not the registered science values/provenance.
         input_keys = [(str(p), fits.getheader(p).get("RUNKEY", signature([p], cfg))) for p in paths]
         key = hashlib.sha256(json.dumps([input_keys, cfg], sort_keys=True).encode()).hexdigest()[:24]
-        output = root / "stacks" / f"{galaxy}_{band}_stack.fit"
+        prefix = group[0].get("product_prefix") or galaxy
+        output = root / "stacks" / f"{prefix}_{band}_stack.fit"
         if cached(output, key, cfg["reuse"]):
             if not keep_registered_noise:
                 compact_registered_noise(paths)
@@ -540,7 +641,7 @@ def stack_exposures(records, root, cfg, keep_registered_noise=False):
             count, rejected = [np.zeros(shape, np.uint16) for _ in range(2)]
             # A per-input compressed rejection mask is written stripwise below via memmaps.
             scratch = root / "scratch"; scratch.mkdir(exist_ok=True)
-            masks = [np.memmap(scratch / f"{galaxy}_{band}_{j}.mask", mode="w+", dtype=np.uint8, shape=shape)
+            masks = [np.memmap(scratch / f"{prefix}_{band}_{j}.mask", mode="w+", dtype=np.uint8, shape=shape)
                      for j in range(len(paths))]
             for rows in slices(shape, cfg["chunk_rows"]):
                 cube = np.stack([h["SCI"].section[rows, :] for h in hdus])
@@ -565,7 +666,7 @@ def stack_exposures(records, root, cfg, keep_registered_noise=False):
                                   "VARIND": vi, "CALSIG": cs}, header)
             for j, mask in enumerate(masks):
                 mh = fits.Header(dict(SOURCE=paths[j].name, MASKCODE="0=kept 1=IQR 2=invalid"))
-                write_images(root / "rejection_masks" / galaxy / f"{paths[j].stem}.fit", {"MASK": mask}, mh)
+                write_images(root / "rejection_masks" / prefix / f"{paths[j].stem}.fit", {"MASK": mask}, mh)
                 mask.flush()
                 filename = Path(mask.filename); del mask; filename.unlink()
             del masks, mean, std, vi, cs, count, rejected
@@ -579,7 +680,7 @@ def stack_exposures(records, root, cfg, keep_registered_noise=False):
 def propagate_stack_errors(stacks, root, cfg):
     results = {}
     for (galaxy, band), path in stacks.items():
-        output = root / "stacks" / f"{galaxy}_{band}_uncertainty.fit"
+        output = Path(path).with_name(Path(path).name.replace("_stack.fit", "_uncertainty.fit"))
         key = signature([path], cfg)
         if not cached(output, key, cfg["reuse"]):
             with fits.open(path, memmap=False) as h:

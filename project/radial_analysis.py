@@ -83,7 +83,7 @@ def fit_sky(frames, source_mask, gcfg, cfg, output):
     """Fit residual planes to clipped off-galaxy boxes; resample spatial blocks jointly."""
     import sep
     output = Path(output); output.mkdir(parents=True, exist_ok=True)
-    bands = list('gri'); shape = frames['r']['data'].shape; ny, nx = shape
+    bands = list(gcfg.get('bands', frames)); shape = frames['r']['data'].shape; ny, nx = shape
     rad = ellipse_radius(shape, gcfg)
     usable = np.ones(shape, bool)
     for frame in frames.values(): usable &= ~frame['mask']
@@ -113,7 +113,7 @@ def fit_sky(frames, source_mask, gcfg, cfg, output):
             # Use the actual mean coordinates of the admitted pixels.
             yy, xx = np.nonzero(good)
             rows.append((x+xx.mean(), y+yy.mean(), rad[y+side//2, x+side//2], *vals))
-    boxes = Table(rows=rows, names=['x','y','elliptical_radius_pixels','g','r','i'])
+    boxes = Table(rows=rows, names=['x','y','elliptical_radius_pixels',*bands])
     if len(boxes) < cfg['minimum_sky_boxes']:
         raise ValueError(f'Only {len(boxes)} sky boxes; inspect sky exclusion/coverage before photometry.')
     X = np.array([_plane(x,y,shape) for x,y in zip(boxes['x'],boxes['y'])])
@@ -144,7 +144,7 @@ def fit_sky(frames, source_mask, gcfg, cfg, output):
         if eligible.sum() < cfg['minimum_sky_boxes']: continue
         alternatives.append([_robust_plane(X[eligible],Y[eligible,j],cfg['minimum_sky_boxes'])[0]
                              for j in range(3)])
-    result = dict(coefficients=coefficients, covariance=covariance,
+    result = dict(bands=bands, coefficients=coefficients, covariance=covariance,
                   alternatives=np.asarray(alternatives), boxes=boxes,
                   residual_floor=np.array([pa.mad(boxes[b+'_residual'][kept[j]]) for j,b in enumerate(bands)]))
     boxes.write(output/'sky_boxes.ecsv',overwrite=True)
@@ -164,12 +164,19 @@ def annulus_weights(shape, gcfg, inner, outer, subpixels):
 
 def measure_annuli(frames, sky, red, review, gcfg, cfg, edges, error_paths):
     """Mean intensity on identical admitted pixels in all bands; never zero-fill holes."""
+    bands = tuple(gcfg.get('bands', frames))
+    if tuple(sky.get('bands', bands)) != bands:
+        raise ValueError('Sky model and science frame band orders differ.')
+    minimum_fraction = gcfg.get('minimum_annulus_fraction', cfg['minimum_annulus_fraction'])
+    if not 0 < minimum_fraction <= 1:
+        raise ValueError('Science annulus coverage must be in (0, 1].')
+    nbands = len(bands)
     shape = frames['r']['data'].shape; scale = frames['r']['scale']; n = len(edges)-1
     common = ~red.copy()
     for frame in frames.values(): common &= ~frame['mask']
     area = np.zeros(n); full = np.pi*gcfg['axis_ratio']*np.diff(np.asarray(edges)**2)
-    basis = np.zeros((n,3)); mean = np.full((3,n),np.nan)
-    random = np.zeros((3,n)); flat = np.zeros((3,n)); review_delta = np.full((3,n),np.nan)
+    basis = np.zeros((n,3)); mean = np.full((nbands,n),np.nan)
+    random = np.zeros((nbands,n)); flat = np.zeros((nbands,n)); review_delta = np.full((nbands,n),np.nan)
     for k,(lo,hi) in enumerate(zip(edges[:-1],edges[1:])):
         sl,w = annulus_weights(shape,gcfg,lo,hi,cfg['annulus_subpixels'])
         if sl is None: continue
@@ -178,7 +185,7 @@ def measure_annuli(frames, sky, red, review, gcfg, cfg, edges, error_paths):
         yy,xx = np.indices(w.shape); xx += sl[1].start; yy += sl[0].start
         basis[k] = [1.,np.sum(w*(xx-(shape[1]-1)/2)/(shape[1]/2))/area[k],
                     np.sum(w*(yy-(shape[0]-1)/2)/(shape[0]/2))/area[k]]
-    for j,b in enumerate('gri'):
+    for j,b in enumerate(bands):
         frame = frames[b]
         # Separate random detector noise from the shared-master bound.
         with fits.open(error_paths[b],memmap=False) as h:
@@ -196,33 +203,34 @@ def measure_annuli(frames, sky, red, review, gcfg, cfg, edges, error_paths):
                     random[j,k] = np.sum(w*w*np.where(common[sl],rand[sl],0))*frame.get('correlation_factor',1.)
                     flat[j,k] = np.sum(w*np.sqrt(np.where(common[sl],cal[sl],0)))
                 wr = w*~review[sl]
-                if wr.sum() > cfg['minimum_annulus_fraction']:
+                if wr.sum() > minimum_fraction:
                     wr /= wr.sum()
                     # Sensitivity only: orange candidates may be genuine galaxy light.
                     d = np.sum(wr*data)-np.sum(w*data)
                     review_delta[j,k] = d
     # Flatten band-major: index = band*n_annuli + annulus.
-    D = np.zeros((3*n,9))
-    for j in range(3): D[j*n:(j+1)*n,j*3:(j+1)*3] = basis
+    D = np.zeros((nbands*n,3*nbands))
+    for j in range(nbands): D[j*n:(j+1)*n,j*3:(j+1)*3] = basis
     stat = np.diag(random.ravel()) + D@sky['covariance']@D.T
     sky_bound = np.zeros_like(mean)
     if len(sky['alternatives']):
-        for j in range(3):
+        for j in range(nbands):
             sky_bound[j] = np.max(np.abs(basis@(sky['alternatives'][:,j]-sky['coefficients'][j]).T),axis=1)
     # Box residuals and mask-choice shifts are coherent sensitivity bounds, not N^-1/2 errors.
     sky_bound = np.maximum(sky_bound,sky['residual_floor'][:,None])
     total = stat.copy()
-    for j in range(3):
+    for j in range(nbands):
         sl = slice(j*n,(j+1)*n)
         total[sl,sl] += np.outer(flat[j],flat[j])+np.outer(sky_bound[j],sky_bound[j])
-    valid = area/full >= cfg['minimum_annulus_fraction']
+    valid = area/full >= minimum_fraction
     mean[:,~valid] = np.nan
-    return dict(edges=np.asarray(edges),mean=mean,area=area,full_area=full,
+    return dict(bands=bands,minimum_annulus_fraction=minimum_fraction,edges=np.asarray(edges),mean=mean,area=area,full_area=full,
                 valid=valid,covariance=total,stat_covariance=stat,flat_bound=flat,
                 sky_bound=sky_bound,review_sensitivity=review_delta,scale=scale)
 
 
-def _half_light(profile, band=1):
+def _half_light(profile, band=None):
+    band = tuple(profile.get('bands', 'gri')).index('r') if band is None else band
     usable = profile['valid'] & np.isfinite(profile['mean'][band])
     # Do not bridge gaps or extrapolate across unmeasured outer annuli.
     stop = np.flatnonzero(~usable)[0] if (~usable).any() else len(usable)
@@ -237,17 +245,20 @@ def _half_light(profile, band=1):
 
 def reference_growth(profile, cfg):
     """Use direct growth where possible; explicitly model missing reference rings."""
-    good = profile['valid'] & np.isfinite(profile['mean'][1])
+    band = tuple(profile.get('bands', 'gri')).index('r')
+    good = profile['valid'] & np.isfinite(profile['mean'][band])
     if good.all():
         return profile, 'observed annular means', 0.
     from scipy.optimize import least_squares
     n = len(good); mid = (profile['edges'][:-1]+profile['edges'][1:])/2
-    y = profile['mean'][1]
-    variance = np.diag(profile['stat_covariance'])[n:2*n]
+    y = profile['mean'][band]
+    variance = np.diag(profile['stat_covariance'])[band*n:(band+1)*n]
     fit = good & (y>3*np.sqrt(np.maximum(variance,0)))
     if fit.sum()<8:
-        raise ValueError('Too few reliable r annuli for either direct growth or an exponential reference model.')
-    V = profile['covariance'][n:2*n,n:2*n][np.ix_(fit,fit)]
+        raise ValueError(f'Only {fit.sum()} reliable r annuli ({good.sum()} pass coverage); '
+                         'need at least 8 for the exponential reference model. '
+                         'Inspect the r-band source mask and reference coverage; science cuts are unchanged.')
+    V = profile['covariance'][band*n:(band+1)*n,band*n:(band+1)*n][np.ix_(fit,fit)]
     eig,vec = np.linalg.eigh(V)
     whiten = (vec/np.sqrt(np.maximum(eig,max(eig.max()*1e-8,1e-20)))).T
     slope,intercept = np.polyfit(mid[fit],np.log(y[fit]),1)
@@ -263,23 +274,39 @@ def reference_growth(profile, cfg):
     def primitive(r): return -(r+h)*h*np.exp(-r/h)
     model_mean = 2*I0*np.diff(primitive(edges))/np.diff(edges**2)
     filled = dict(profile,mean=profile['mean'].copy(),valid=np.ones(n,bool))
-    filled['mean'][1,~good] = model_mean[~good]
+    filled['mean'][band,~good] = model_mean[~good]
     inferred = np.sum(model_mean[~good]*profile['full_area'][~good])
-    total = np.sum(filled['mean'][1]*profile['full_area'])
+    total = np.sum(filled['mean'][band]*profile['full_area'])
     return filled, 'exponential disk infill for missing r reference annuli; science bins remain masked', float(inferred/total)
 
 
 def determine_geometry(frames, sky, red, review, gcfg, cfg, error_paths, fraction, output):
+    # R_e is an r-band reference measurement, independent of u/g coverage.
+    # The final science profiles still use the original multiband coverage cut.
+    reference_minimum = cfg.get('minimum_reference_annulus_fraction', 0.5)
+    if not 0 < reference_minimum <= 1:
+        raise ValueError('Reference annulus coverage must be in (0, 1].')
+    bands = tuple(sky.get('bands', gcfg.get('bands', frames)))
+    r_index = bands.index('r'); ids = np.arange(3*r_index, 3*r_index+3)
+    alternatives = np.asarray(sky['alternatives'])
+    reference_sky = dict(sky, bands=('r',),
+        coefficients=np.asarray(sky['coefficients'])[r_index:r_index+1],
+        covariance=np.asarray(sky['covariance'])[np.ix_(ids,ids)],
+        alternatives=alternatives[:,r_index:r_index+1] if len(alternatives) else np.empty((0,1,3)),
+        residual_floor=np.asarray(sky['residual_floor'])[r_index:r_index+1])
+    reference_cfg = dict(cfg, minimum_annulus_fraction=reference_minimum)
     fine_edges = np.linspace(0,gcfg['outer_radius_pixels'],cfg['growth_annuli']+1)
-    growth = measure_annuli(frames,sky,red,review,gcfg,cfg,fine_edges,error_paths)
+    growth = measure_annuli({'r':frames['r']}, reference_sky, red, review,
+                           dict(gcfg,bands='r',minimum_annulus_fraction=reference_minimum), reference_cfg, fine_edges, {'r':error_paths['r']})
     reference,method,inferred = reference_growth(growth,cfg)
     re,radii,curve,tail,stop = _half_light(reference)
+    band = tuple(growth.get('bands', 'gri')).index('r')
     n = len(fine_edges)-1; rng = np.random.default_rng(cfg['random_seed']); draws = []
-    covariance = growth['covariance'][n:2*n,n:2*n]
+    covariance = growth['covariance'][band*n:(band+1)*n,band*n:(band+1)*n]
     eig,vec = np.linalg.eigh(covariance); root = vec*np.sqrt(np.maximum(eig,0))
     for _ in range(cfg['radius_uncertainty_draws']):
         sample = dict(growth,mean=growth['mean'].copy())
-        sample['mean'][1] += root@rng.normal(size=n)
+        sample['mean'][band] += root@rng.normal(size=n)
         try: draws.append(_half_light(reference_growth(sample,cfg)[0])[0])
         except ValueError: pass
     re_error = float(np.std(draws,ddof=1)) if len(draws)>10 else np.nan
@@ -290,7 +317,9 @@ def determine_geometry(frames, sky, red, review, gcfg, cfg, error_paths, fractio
                   re_error_kpc=float(np.hypot(re_error*kpc_per_pixel,re*kpc_per_pixel*ds/distance)),
                   kpc_per_pixel=kpc_per_pixel,bin_width_pixels=fraction*re,
                   fraction_of_half_light_radius=fraction,reference_band='r',
-                  reference_method=method,modelled_reference_light_fraction=inferred,
+                  reference_mask_bands=['r'],reference_minimum_annulus_fraction=reference_minimum,
+                  reference_usable_annuli=int(growth['valid'].sum()),
+                  reference_method='r-only footprint; '+method,modelled_reference_light_fraction=inferred,
                   measured_outer_pixels=float(radii[-1]),outer_light_fraction=tail,
                   radius_definition='half of measured r light within the reported outer ellipse',
                   aperture_limited=bool(tail>cfg['growth_tail_fraction']))
@@ -309,6 +338,7 @@ def determine_geometry(frames, sky, red, review, gcfg, cfg, error_paths, fractio
 
 def magnitude_profiles(profile, solutions, cfg):
     """Solve only calibration equations whose nonzero color dependencies are available."""
+    bands = tuple(profile.get('bands', 'gri'))
     n = profile['mean'].shape[1]; I = profile['mean']/profile['scale']**2
     raw = np.where(I>0,-2.5*np.log10(np.maximum(I,1e-300)),np.nan)
     J = np.zeros((3*n,3*n))
@@ -317,14 +347,14 @@ def magnitude_profiles(profile, solutions, cfg):
         J[index,index] = np.divide(-2.5/np.log(10),profile['mean'][j],
                                   out=np.zeros(n),where=profile['mean'][j]>0)
     raw_cov = J@profile['covariance']@J.T
-    active = set(solutions)&set('gri')
+    active = set(solutions)&set(bands)
     while True:
         allowed = {b for b in active if solutions[b]['color_term']==0 or set(solutions[b]['color_pair'])<=active}
         if allowed==active: break
         active = allowed
     calibrated = np.full((3,n),np.nan); cov = np.full((3*n,3*n),np.nan)
-    status = {b:'instrumental: zero point or color dependency unavailable' for b in 'gri'}
-    active = [b for b in 'gri' if b in active]
+    status = {b:'instrumental: zero point or color dependency unavailable' for b in bands}
+    active = [b for b in bands if b in active]
     if active:
         A = np.eye(len(active)); offset = []; color_vectors = []
         for j,b in enumerate(active):
@@ -335,7 +365,7 @@ def magnitude_profiles(profile, solutions, cfg):
             A[j] -= c*v; color_vectors.append(v)
             offset.append(sol['zp']-c*sol['pivot'])
         if np.linalg.cond(A) <= cfg['maximum_calibration_condition']:
-            inv = np.linalg.inv(A); inds = ['gri'.index(b) for b in active]
+            inv = np.linalg.inv(A); inds = [bands.index(b) for b in active]
             calibrated[inds] = inv@(np.nan_to_num(raw[inds])+np.asarray(offset)[:,None])
             for j, idx in enumerate(inds):
                 needed = np.abs(inv[j]) > 1e-12
@@ -346,12 +376,16 @@ def magnitude_profiles(profile, solutions, cfg):
                 sol = solutions[b]; cal_cov[2*i:2*i+2,2*i:2*i+2] = sol['covariance']
                 color = color_vectors[i]@calibrated[inds]-sol['pivot'] if sol['color_term'] else np.zeros(n)
                 for j,bb in enumerate(active):
-                    out = 'gri'.index(bb)*n+np.arange(n)
-                    transform[out,'gri'.index(b)*n+np.arange(n)] = inv[j,i]
+                    out = bands.index(bb)*n+np.arange(n)
+                    transform[out,bands.index(b)*n+np.arange(n)] = inv[j,i]
                     cal_jac[out,2*i] = inv[j,i]; cal_jac[out,2*i+1] = inv[j,i]*color
                 status[b] = ('provisional Sloan: large color response' if abs(sol['color_term'])>.5 else 'Sloan calibrated')
+                if sol.get('provisional_band_mapping', False):
+                    status[b] = 'provisional Sloan: inferred filter mapping'
+                if sol.get('provisional_flat_uncertainty', False):
+                    status[b] = 'provisional Sloan: assumed external-flat uncertainty'
             computed = transform@raw_cov@transform.T+np.nan_to_num(cal_jac)@cal_cov@np.nan_to_num(cal_jac).T
-            index = np.concatenate([np.arange('gri'.index(b)*n,('gri'.index(b)+1)*n) for b in active])
+            index = np.concatenate([np.arange(bands.index(b)*n,(bands.index(b)+1)*n) for b in active])
             cov[np.ix_(index,index)] = computed[np.ix_(index,index)]
         else:
             for b in active: status[b] = 'instrumental: ill-conditioned color transformation'
@@ -382,10 +416,11 @@ def foreground_extinction(frame, gcfg, cfg, cache):
             samples.append(dict(ra=float(pos.ra.deg),dec=float(pos.dec.deg),ebv_sfd=value))
     values = np.array([s['ebv_sfd'] for s in samples]); ebv = float(np.median(values))
     sigma = float(max(pa.mad(values),cfg['dust_ebv_floor'],cfg['dust_fractional_error']*ebv))
-    R = np.array([cfg['extinction_coefficients'][b] for b in 'gri'])
+    bands = tuple(gcfg.get('bands', 'gri'))
+    R = np.array([cfg['extinction_coefficients'][b] for b in bands])
     extinction = R*ebv
     cov = np.outer(R,R)*sigma**2+np.diag((extinction*cfg['extinction_law_fractional_error'])**2)
-    result = dict(query=key,samples=samples,ebv_sfd=ebv,ebv_error_assumed=sigma,
+    result = dict(bands=bands,query=key,samples=samples,ebv_sfd=ebv,ebv_error_assumed=sigma,
                   extinction=extinction.tolist(),covariance=cov.tolist(),
                   source='IRSA SFD off-galaxy samples; SF11 R_V=3.1 SDSS coefficients per original SFD E(B-V)',
                   uncertainty='spatial MAD or assumed fractional/floor uncertainty, whichever is largest')
@@ -395,6 +430,9 @@ def foreground_extinction(frame, gcfg, cfg, cache):
 def save_profiles(profile, photometry, geometry, output, extinction=None):
     """Save tabular values and full cross-band/cross-annulus covariance."""
     output = Path(output); output.mkdir(parents=True,exist_ok=True)
+    bands = tuple(profile.get('bands', 'gri'))
+    if extinction is not None and tuple(extinction.get('bands', 'gri')) != bands:
+        raise ValueError('Extinction and profile band orders differ.')
     n = profile['mean'].shape[1]; mid = (profile['edges'][1:]+profile['edges'][:-1])/2
     A = np.zeros(3) if extinction is None else np.asarray(extinction['extinction'])
     ext_cov = np.zeros((3,3)) if extinction is None else np.asarray(extinction['covariance'])
@@ -403,7 +441,7 @@ def save_profiles(profile, photometry, geometry, output, extinction=None):
     instrumental = photometry['instrumental']-A[:,None]
     covariance = photometry['covariance']+delta_cov
     raw_cov = photometry['instrumental_covariance']+delta_cov
-    for j,b in enumerate('gri'):
+    for j,b in enumerate(bands):
         for k in range(n):
             idx = j*n+k; sigma = np.sqrt(max(profile['covariance'][idx,idx],0))
             rows.append((b,k,profile['edges'][k],profile['edges'][k+1],mid[k]*profile['scale'],
@@ -420,12 +458,15 @@ def save_profiles(profile, photometry, geometry, output, extinction=None):
            'shared_master_bound','sky_model_bound','orange_mask_sensitivity','instrumental_mu','instrumental_mu_error',
            'mu','mu_error','calibration_status','A_MW','above_3sigma']
     table = Table(rows=rows,names=names)
+    table['coverage_pass'] = np.tile(profile['valid'], len(bands))
     table['intensity_upper_3sigma'] = np.maximum(table['intensity_ADU_s_arcsec2'],0)+3*table['total_error_bound']
-    table.meta.update(surface_brightness='mag/arcsec2; instrumental_mu has arbitrary zero point',
+    table.meta.update(bands=list(bands),
+                      minimum_annulus_fraction=profile.get('minimum_annulus_fraction', .65),
+                      surface_brightness='mag/arcsec2; instrumental_mu has arbitrary zero point',
                       extinction_applied=extinction is not None,
                       extinction_columns='correction applies to magnitude columns; intensity columns retain observed values',
                       error_note='total_error_bound includes conservative coherent master/sky bounds; orange sensitivity separate',
-                      covariance_order='band-major g annuli, r annuli, i annuli',
+                      covariance_order='band-major: '+','.join(bands),
                       extinction_note='MW only; nominal SDSS coefficients remain provisional for unverified passbands')
     table.write(output/'surface_photometry.ecsv',overwrite=True)
     np.savez(output/'covariance.npz',flux=profile['covariance'],flux_stat=profile['stat_covariance'],
@@ -436,13 +477,20 @@ def save_profiles(profile, photometry, geometry, output, extinction=None):
 def plot_profiles(table, covariance_path, galaxy, output, corrected=False):
     import matplotlib.pyplot as plt
     cov = np.load(covariance_path); n = len(table)//3
+    bands = tuple(table.meta.get('bands', dict.fromkeys(table['band'])))
+    threshold = table.meta.get('minimum_annulus_fraction', .65)
+    coverage = (np.asarray(table['coverage_pass'],bool) if 'coverage_pass' in table.colnames
+                else np.asarray(table['valid_fraction']) >= threshold)
+    no_coverage = not coverage.any()
     has_cal = np.isfinite(table['mu']).any()
-    has_raw = any(not np.isfinite(table['mu'][table['band']==b]).any() for b in 'gri')
+    has_raw = any(not np.isfinite(table['mu'][table['band']==b]).any() for b in bands)
     count = 2 if has_cal and has_raw else 1
     fig,axes = plt.subplots(count+2,1,figsize=(10,3.1*(count+2)),sharex=True,layout='constrained')
     brightness = {True:axes[0],False:axes[1] if count==2 else axes[0]}
     color_axes = axes[count:]
-    for j,(b,color) in enumerate(zip('gri',['tab:green','tab:red','tab:purple'])):
+    colors = {'u':'tab:blue','g':'tab:green','r':'tab:red','i':'tab:purple'}
+    for b in bands:
+        color = colors[b]
         t = table[table['band']==b]; calibrated = np.isfinite(t['mu']).any()
         value = np.asarray(t['mu'] if calibrated else t['instrumental_mu'])
         error = np.asarray(t['mu_error'] if calibrated else t['instrumental_mu_error'])
@@ -463,13 +511,16 @@ def plot_profiles(table, covariance_path, galaxy, output, corrected=False):
     for calibrated in ([True,False] if count==2 else [bool(has_cal)]):
         ax = brightness[calibrated]; ax.invert_yaxis()
         ax.set_ylabel('Surface brightness (mag/arcsec²)')
-        ax.set_title('Calibrated Sloan profiles' if calibrated else 'Instrumental profiles — arbitrary zero points')
+        title = 'Calibrated Sloan profiles' if calibrated else 'Instrumental profiles — arbitrary zero points'
+        if calibrated and any(str(status).startswith('provisional') for status in table['calibration_status']):
+            title += ' (provisional)'
+        ax.set_title(title)
         ax.legend()
-    for ax,(a,b) in zip(color_axes,[('g','r'),('r','i')]):
+    for ax,(a,b) in zip(color_axes,zip(bands[:-1],bands[1:])):
         ta,tb = table[table['band']==a],table[table['band']==b]
         calibrated = np.isfinite(ta['mu']).any() and np.isfinite(tb['mu']).any()
         col = 'mu' if calibrated else 'instrumental_mu'; V = cov['magnitudes' if calibrated else 'instrumental']
-        ia,ib = 'gri'.index(a)*n+np.arange(n),'gri'.index(b)*n+np.arange(n)
+        ia,ib = bands.index(a)*n+np.arange(n),bands.index(b)*n+np.arange(n)
         error = np.sqrt(np.maximum(V[ia,ia]+V[ib,ib]-2*V[ia,ib],0))
         good = np.asarray(ta['above_3sigma']) & np.asarray(tb['above_3sigma'])
         value = np.asarray(ta[col]-tb[col]); good &= np.isfinite(value)
@@ -485,7 +536,12 @@ def plot_profiles(table, covariance_path, galaxy, output, corrected=False):
             if lower.any(): ax.scatter(ta['radius_kpc'][lower],(la-np.asarray(tb[col]))[lower],marker='^',facecolors='none',edgecolors='gray',label='3σ lower bounds')
             if upper.any(): ax.scatter(ta['radius_kpc'][upper],(np.asarray(ta[col])-lb)[upper],marker='v',facecolors='none',edgecolors='gray',label='3σ upper bounds')
         ax.set_ylabel('Color (mag)'); ax.legend()
-        if not good.any(): ax.text(.98,.05,'No joint >3σ detections',transform=ax.transAxes,ha='right',fontsize=9)
+        if not good.any() and not no_coverage:
+            ax.text(.98,.05,'No joint >3σ detections',transform=ax.transAxes,ha='right',fontsize=9)
+    if no_coverage:
+        for ax in axes:
+            ax.text(.5,.5,f'No annuli pass {threshold:.0%} common coverage',
+                    transform=ax.transAxes,ha='center',va='center')
     fig.suptitle(galaxy+(' — Milky Way extinction corrected' if corrected else ' — observed'))
     axes[-1].set_xlabel('Elliptical semimajor radius (kpc)')
     for ax in axes: ax.grid(alpha=.2)
