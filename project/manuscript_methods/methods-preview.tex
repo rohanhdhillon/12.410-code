@@ -1,11 +1,22 @@
 \documentclass[twocolumn]{aastex631}
 \shorttitle{Color Photometry of M33 and NGC 6503}
 \shortauthors{Dhillon}
+\usepackage{placeins}
+\makeatletter
+% Let the column's footnote insertion set the width in AASTeX 6.3.1.
+\long\def\ltx@foottext#1#2{%
+  \begingroup
+  \expandafter\ltx@make@current@footnote\expandafter{\@mpfn}{#1}%
+  \@footnotetext{#2}%
+  \endgroup
+}
+\makeatother
 \begin{document}
 \title{Color Photometry of M33 and NGC 6503}
 \author{Rohan Dhillon}
 \affiliation{Massachusetts Institute of Technology}
 \input{methods}
+\FloatBarrier
 \bibliographystyle{aasjournal}
 \bibliography{methods-references}
 \end{document}
