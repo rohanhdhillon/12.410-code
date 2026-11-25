@@ -203,11 +203,12 @@ def numeric_gain(headers, cfg):
 
 
 def install_external_flat(setup, source, band, *, fractional_floor=0.01,
-                          minimum_signal=5884.0, bad_columns=(0,)):
+                          minimum_signal=5884.0, bad_columns=(0,), raw_directory=None):
     """Install an already bias-subtracted, normalized master; never treat it as raw.
 
     The fractional floor is an assumed sensitivity bound, not a measured error.
     minimum_signal is the lowest bias-subtracted input median recorded in HISTORY.
+    When the original inputs are available, use their measured repeatability instead.
     """
     source = Path(source)
     flat = load(source); header = fits.getheader(source)
@@ -228,6 +229,16 @@ def install_external_flat(setup, source, band, *, fractional_floor=0.01,
     spec = dict(source=str(source), fractional_floor=fractional_floor,
                 minimum_signal=minimum_signal, bad_columns=list(bad_columns),
                 ncombine=int(header["NCOMBINE"]))
+    if raw_directory is not None:
+        raw_directory = Path(raw_directory)
+        inputs = [line.split()[0] for line in header.get("HISTORY", []) if " median=" in line]
+        if len(inputs) != spec["ncombine"] or len(set(inputs)) != len(inputs):
+            raise ValueError(f"External master must name every raw flat in HISTORY: {source}")
+        spec["raw_flats"] = [str(raw_directory / Path(name).name) for name in inputs]
+        spec["bias_path"] = str(raw_directory / Path(header["BIASFILE"]).name)
+        for path in [*spec["raw_flats"], spec["bias_path"]]:
+            if not Path(path).is_file():
+                raise FileNotFoundError(f"Missing original external-flat input: {path}")
     key = signature([source], spec)
     safe_band = "".join(c for c in band if c.isalnum())
     target = setup["output_dir"] / f"master_flat_{safe_band}.fit"
@@ -235,11 +246,12 @@ def install_external_flat(setup, source, band, *, fractional_floor=0.01,
         header["ORIGFILT"] = header["FILTER"]
         header["FILTER"], header["BUNIT"] = band, "relative"
         header["BIASCOR"], header["FLTNORM"], header["DARKCOR"] = True, True, False
-        header["FLATLOW"], header["FLATPROV"] = False, True
+        header["FLATLOW"], header["FLATPROV"] = False, raw_directory is None
         header["RDMISS"] = header.get("READOUTM") is None
         header["RUNKEY"], header["SRCFILE"] = key, source.name
         header.add_history("Supplied normalized master; no additional bias subtraction.")
-        header.add_history("External-flat uncertainty is modeled, not measured from raw inputs.")
+        if raw_directory is None:
+            header.add_history("External-flat uncertainty is modeled, not measured from raw inputs.")
         fits.writeto(target, flat, header, overwrite=True)
     setup["flat_files"][band] = target
     setup["low_signal_flats"].discard(band)
@@ -259,15 +271,59 @@ def external_flat_variance(flat, spec, gain, read_noise):
             + (spec["fractional_floor"] * flat)**2).astype(np.float32)
 
 
+def external_flat_repeat_variance(flat, spec, saturation):
+    """Reproduce the supplied master and measure repeat variance conditional on its bias."""
+    master_header = fits.getheader(spec["source"])
+    fields = ("TELESCOP", "INSTRUME", "XBINNING", "YBINNING", "XORGSUBF", "YORGSUBF", "SET-TEMP")
+    bias_path = spec["bias_path"]
+    bias = load(bias_path)
+    bias_header = fits.getheader(bias_path)
+    if (bias.shape != flat.shape or not np.isfinite(bias).all() or
+            any(bias_header.get(field) != master_header.get(field) for field in fields)):
+        raise ValueError(f"External-flat bias does not match detector setup: {bias_path}")
+
+    good_columns = np.ones(flat.shape[1], dtype=bool)
+    good_columns[spec["bad_columns"]] = False
+    samples = []
+    for path in spec["raw_flats"]:
+        raw = load(path)
+        header = fits.getheader(path)
+        if (raw.shape != flat.shape or
+                any(header.get(field) != master_header.get(field) for field in fields) or
+                header.get("FILTER", "").replace("'", "") != master_header["FILTER"].replace("'", "")):
+            raise ValueError(f"Raw flat does not match external master setup: {path}")
+        if not np.isfinite(raw).all() or np.any(raw[:, good_columns] >= saturation):
+            raise ValueError(f"Nonfinite or saturated external-flat input: {path}")
+        signal = raw - bias
+        scale = np.median(signal)
+        if scale <= 0:
+            raise ValueError(f"Nonpositive external-flat median signal: {path}")
+        samples.append(signal / scale)
+
+    cube = np.stack(samples)
+    del samples
+    reconstructed = np.median(cube, axis=0)
+    normalization = np.median(reconstructed)
+    if normalization <= 0 or not np.allclose(reconstructed[:, good_columns] / normalization,
+                                             flat[:, good_columns], rtol=5e-5, atol=5e-6):
+        raise ValueError(f"Original inputs do not reproduce the supplied external master: {spec['source']}")
+    variance = np.pi / (2 * len(cube)) * np.var(cube, axis=0, ddof=1) / normalization**2
+    variance[:, ~good_columns] = np.nan
+    return variance.astype(np.float32, copy=False)
+
+
 def calibration_models(setups, root, cfg):
     """Estimate temporal noise and linearized uncertainty of the measured masters."""
     models = {}
     for name, setup in setups.items():
         paths = setup["bias_paths"] + setup["flat_paths"]
-        key = signature(paths + [setup["output_dir"] / "master_bias.fit"]
+        external_flats = setup.get("external_flats", {})
+        repeat_inputs = [path for spec in external_flats.values() if "raw_flats" in spec
+                         for path in [spec["source"], spec["bias_path"], *spec["raw_flats"]]]
+        key = signature(paths + repeat_inputs + [setup["output_dir"] / "master_bias.fit"]
                         + list(setup["flat_files"].values()),
-                        dict(calibration_parameters(cfg), external_flats=setup["external_flats"])
-                        if setup.get("external_flats") else calibration_parameters(cfg))
+                        dict(calibration_parameters(cfg), external_flats=external_flats)
+                        if external_flats else calibration_parameters(cfg))
         folder = root / "uncertainty" / name; folder.mkdir(parents=True, exist_ok=True)
         metadata = folder / "model.json"
         if cfg["reuse"] and metadata.exists():
@@ -276,6 +332,11 @@ def calibration_models(setups, root, cfg):
                 models[name] = saved
                 print(f"{name}: reusing calibration uncertainty maps", flush=True)
                 continue
+        repeat_variances = {
+            band: external_flat_repeat_variance(load(setup["flat_files"][band]), spec,
+                                                cfg["saturation_adu"])
+            for band, spec in external_flats.items() if "raw_flats" in spec
+        }
         shape = setup["shape"]
         bias = load(setup["output_dir"] / "master_bias.fit")
         bias_std = np.empty(shape, np.float32)
@@ -327,14 +388,18 @@ def calibration_models(setups, root, cfg):
                      bias_file=str(bias_file), flats={}, products=[str(bias_file)])
         for band, flat_paths in setup["flat_groups"].items():
             flat = load(setup["flat_files"][band]); scales, samples = [], []
-            external = setup.get("external_flats", {}).get(band)
+            external = external_flats.get(band)
+            provisional = bool(external and "raw_flats" not in external)
             if external:
                 # Independent external master: no covariance with the science master bias.
                 alpha, normalization = 0.0, 1.0
-                vf = external_flat_variance(flat, external, gain, rn)
-                warnings.warn(f"{name} {band}: supplied master has no measured variance; "
-                              f"using modeled noise plus assumed {external['fractional_floor']:.1%} "
-                              "shared flat uncertainty (provisional).")
+                if provisional:
+                    vf = external_flat_variance(flat, external, gain, rn)
+                    warnings.warn(f"{name} {band}: supplied master has no measured variance; "
+                                  f"using modeled noise plus assumed {external['fractional_floor']:.1%} "
+                                  "shared flat uncertainty (provisional).")
+                else:
+                    vf = repeat_variances[band]
             else:
                 for path in flat_paths:
                     raw = load(path)
@@ -378,18 +443,26 @@ def calibration_models(setups, root, cfg):
                                   APVAR=aperture_variance, APNUM=cfg["flat_apertures"], APSIZE=size))
             if external:
                 fh["NCOMBINE"] = external["ncombine"]
-                fh["FLATPROV"], fh["FLTFLOOR"] = True, external["fractional_floor"]
+                fh["FLATPROV"] = provisional
                 fh["SRCFILE"] = Path(external["source"]).name
-                fh["MINSIG"] = external["minimum_signal"]
-                fh["ERRMODEL"] = "PHOTON+ASSUMED_FLOOR"
-                fh.add_history("VAR: modeled median photon/read noise plus assumed shared fractional floor.")
-                fh.add_history("External bias, illumination, normalization errors unmeasured; floor is a sensitivity assumption.")
+                if provisional:
+                    fh["FLTFLOOR"] = external["fractional_floor"]
+                    fh["MINSIG"] = external["minimum_signal"]
+                    fh["ERRMODEL"] = "PHOTON+ASSUMED_FLOOR"
+                    fh.add_history("VAR: modeled median photon/read noise plus assumed shared fractional floor.")
+                    fh.add_history("External bias, illumination, normalization errors unmeasured; floor is a sensitivity assumption.")
+                else:
+                    fh["BIASFILE"] = Path(external["bias_path"]).name
+                    fh["ERRMODEL"] = "REPEAT_FLATS"
+                    fh.add_history("VAR is measured repeat-flat variance conditional on the external bias.")
+                    for path in external["raw_flats"]:
+                        fh.add_history(f"Input: {Path(path).name}")
             else:
                 fh.add_history("VAR is repeat-flat variance of a median, conditional on the master bias.")
             fh.add_history("APVAR is spatial aperture scatter, not treated as random measurement noise.")
             write_images(flat_file, {"VAR": vf}, fh)
             model["flats"][band] = dict(file=str(flat_file), alpha=alpha, external=bool(external), normalization=normalization,
-                                          aperture_variance=aperture_variance)
+                                          aperture_variance=aperture_variance, provisional=provisional)
             model["products"].append(str(flat_file))
             del flat, vf
         metadata.write_text(json.dumps(model, indent=2)+"\n")
@@ -455,11 +528,14 @@ def calibrate_exposures(setups, models, root, cfg):
                         h["RAWFILT"], h["FILTER"] = band, physical_band
                         h["BANDMAP"] = (True, "Inferred M33 filter mapping")
                         h.add_history(f"Inferred filter mapping: raw {band} -> {physical_band}; raw file untouched.")
-                    h["FLATPROV"] = bool(fm.get("external", False))
-                    if fm.get("external", False):
-                        h["FLTFLOOR"] = external["fractional_floor"]
+                    h["FLATPROV"] = fm.get("provisional", bool(external))
+                    if external:
                         h["FLATSRC"] = Path(external["source"]).name
-                        h.add_history("External flat: independent bias; modeled noise plus assumed shared floor.")
+                        if h["FLATPROV"]:
+                            h["FLTFLOOR"] = external["fractional_floor"]
+                            h.add_history("External flat: independent bias; modeled noise plus assumed shared floor.")
+                        else:
+                            h.add_history("External flat: measured repeat variance conditional on its independent bias.")
                     h["VARAPPRO"], h["NORMCOV"] = True, False
                     h.add_history("Linearized median-master errors; normalization/gain-fit uncertainty not included.")
                     if weak:h.add_history("WARNING: weak M33 g flat explicitly used provisionally; inspect large flat errors.")
@@ -549,12 +625,14 @@ def _detector_covariance(jacobian, variance):
     return (jacobian @ jacobian.T).toarray()
 
 
-def master_annulus_covariance(frames, bands, points, n, galaxy, manifest, masters_dir):
+def master_annulus_covariance(frames, bands, points, n, galaxy, manifest, masters_dir,
+                              *, flat_fractional_errors=None):
     """Propagate native bias and flat errors through the fixed WCS and stack selection.
 
     Distinct detector pixels have independent repeat noise. A pixel's master error
     is reused in every exposure, including bands with the same bias master. The
     supplied flat's explicit fractional floor is a separate coherent sensitivity.
+    An optional fractional repeatability replaces both flat terms for that band.
     """
     from scipy.sparse import csr_matrix, vstack
 
@@ -564,6 +642,7 @@ def master_annulus_covariance(frames, bands, points, n, galaxy, manifest, master
     pixel = np.zeros((len(bands)*n, len(bands)*n))
     coherent = np.zeros_like(pixel)
     bias_responses = {}
+    flat_fractional_errors = flat_fractional_errors or {}
     _, y, x, _ = points
     if not len(y):
         return pixel, coherent
@@ -585,11 +664,18 @@ def master_annulus_covariance(frames, bands, points, n, galaxy, manifest, master
         model = json.loads((error_dir/'model.json').read_text())['flats'][raw_band]
         bias = load(cal_dir/'master_bias.fit')
         flat = load(cal_dir/f'master_flat_{raw_band}.fit')
-        with fits.open(error_dir/f'flat_{raw_band}_uncertainty.fit', memmap=False) as hdus:
-            flat_var = hdus['VAR'].data.ravel().astype(float)
-            floor = float(hdus[0].header.get('FLTFLOOR', 0.))
-        floor_sigma = floor*flat.ravel()
-        flat_var = np.maximum(flat_var - floor_sigma**2, 0.)
+        if band in flat_fractional_errors:
+            fraction = float(flat_fractional_errors[band])
+            if not np.isfinite(fraction) or fraction <= 0:
+                raise ValueError(f'{band}: flat repeatability must be positive and finite.')
+            flat_var = (fraction * flat.ravel().astype(float))**2
+            floor_sigma = np.zeros(flat.size)
+        else:
+            with fits.open(error_dir/f'flat_{raw_band}_uncertainty.fit', memmap=False) as hdus:
+                flat_var = hdus['VAR'].data.ravel().astype(float)
+                floor = float(hdus[0].header.get('FLTFLOOR', 0.))
+            floor_sigma = floor*flat.ravel()
+            flat_var = np.maximum(flat_var - floor_sigma**2, 0.)
         bias_jac = csr_matrix((n, flat.size))
         flat_jac = csr_matrix((n, flat.size))
         for source, weights in _annular_detector_weights(band_records, frame['wcs'], points, counts,

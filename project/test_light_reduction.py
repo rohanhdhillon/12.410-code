@@ -69,6 +69,8 @@ class ReductionTests(unittest.TestCase):
             header = reference.copy()
             header.update(dict(FILTER="g'", MASTER=True, BIASFILE='independent_bias.fit',
                                NORMTYPE='MEDIAN', NCOMBINE=10))
+            for j in range(10):
+                header.add_history(f'raw_flat_{j}.fit exp=15s median=8000.0')
             source = root/'supplied.fits'
             flat = np.ones(shape, np.float32); flat[5, 5] = 2.
             fits.writeto(source, flat, header)
@@ -132,6 +134,43 @@ class ReductionTests(unittest.TestCase):
                 warnings.simplefilter('ignore')
                 revised = calibration_models({'refractor_3x3': setup}, root, cfg)
             self.assertNotEqual(revised['refractor_3x3']['key'], model['key'])
+
+            external_bias = np.full(shape, 20., np.float32)
+            fits.writeto(root/'independent_bias.fit', external_bias, reference)
+            offsets = np.arange(-9, 10, 2, dtype=np.float32)
+            for j, offset in enumerate(offsets):
+                raw_flat = flat * 8000 + external_bias
+                raw_flat[:, 0] = 0
+                raw_flat[1, 1] += offset
+                raw_header = reference.copy()
+                raw_header['FILTER'] = 'g'
+                fits.writeto(root/f'raw_flat_{j}.fit', raw_flat, raw_header)
+            install_external_flat(setup, source, 'g', raw_directory=root)
+            measured = calibration_models({'refractor_3x3': setup}, root, cfg)['refractor_3x3']
+            self.assertNotEqual(measured['key'], revised['refractor_3x3']['key'])
+            self.assertEqual(measured['flats']['g']['alpha'], 0.)
+            with fits.open(measured['flats']['g']['file']) as h:
+                self.assertFalse(h[0].header['FLATPROV'])
+                self.assertNotIn('FLTFLOOR', h[0].header)
+                self.assertEqual(h[0].header['ERRMODEL'], 'REPEAT_FLATS')
+                expected = np.pi/20 * np.var(offsets/8000, ddof=1)
+                self.assertAlmostEqual(float(h['VAR'].data[1, 1]), expected, places=10)
+            measured_records = calibrate_exposures({'refractor_3x3': setup},
+                                                   {'refractor_3x3': measured}, root, cfg)
+            with fits.open(measured_records[0]['calibrated']) as h:
+                self.assertFalse(h[0].header['FLATPROV'])
+                self.assertNotIn('FLTFLOOR', h[0].header)
+                self.assertTrue(np.isnan(h['SCI'].data[:, 0]).all())
+                self.assertAlmostEqual(float(h['SCI'].data[1, 1]), 50.)
+
+            variance_file = Path(measured['flats']['g']['file'])
+            timestamp = variance_file.stat().st_mtime_ns
+            raw_path = root/'raw_flat_0.fit'
+            with fits.open(raw_path, mode='update', memmap=False) as h:
+                h[0].data[1, 1] += 100
+            with self.assertRaisesRegex(ValueError, 'do not reproduce'):
+                calibration_models({'refractor_3x3': setup}, root, cfg)
+            self.assertEqual(variance_file.stat().st_mtime_ns, timestamp)
 
     def test_iqr_rejection_and_no_coverage(self):
         a = np.zeros((10, 2, 2), np.float32)
