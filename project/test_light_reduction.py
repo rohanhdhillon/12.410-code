@@ -1,4 +1,5 @@
 """Run with: .venv/bin/python -m unittest discover -s project -p 'test_light_reduction.py'."""
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -10,7 +11,7 @@ from astropy.wcs import WCS
 from light_reduction import (iqr_selection, resample_noise, transfer_wcs,
                              write_images, stack_exposures, propagate_stack_errors,
                              install_external_flat, calibration_models, calibrate_exposures,
-                             register_exposures)
+                             register_exposures, master_annulus_covariance)
 
 
 def example_wcs():
@@ -166,6 +167,59 @@ class ReductionTests(unittest.TestCase):
                                           source, target, (20, 20), {'chunk_rows': 4})
         np.testing.assert_allclose(variance[2:-2, 2:-2], .25, atol=1e-6)
         np.testing.assert_allclose(shared[2:-2, 2:-2], 2., atol=1e-6)
+
+    def test_annular_master_covariance_uses_native_pixels_and_shared_bias(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            setup = 'refractor_3x3'
+            masters = root/'calibration'/setup
+            errors = root/'uncertainty'/setup
+            masks = root/'rejection_masks'/'m33_ugr'
+            for folder in (masters, errors, masks, root/'wcs'):
+                folder.mkdir(parents=True)
+            shape = (6, 6)
+            source_wcs = example_wcs()
+            target_wcs = source_wcs.deepcopy()
+            target_wcs.wcs.crpix[0] -= .5
+            fits.writeto(masters/'master_bias.fit', np.full(shape, 10.))
+            write_images(errors/'bias_uncertainty.fit', {'VAR':np.full(shape, 4.)})
+            (errors/'model.json').write_text(json.dumps({'flats':{'g':{'alpha':0.}, 'i':{'alpha':.01}}}))
+            frames, records = {}, []
+            for band, raw, signals, variance, floor in [('u', 'g', (30., 50.), .01, .01),
+                                                        ('r', 'i', (50.,), .04, 0.)]:
+                fits.writeto(masters/f'master_flat_{raw}.fit', np.ones(shape))
+                write_images(errors/f'flat_{raw}_uncertainty.fit', {'VAR':np.full(shape, variance+floor**2)},
+                             fits.Header({'FLTFLOOR':floor}))
+                counts = np.full(shape, len(signals), dtype=np.uint16)
+                for i, signal in enumerate(signals):
+                    source = root/f'{band}{i}.fit'
+                    fits.writeto(source, np.full(shape, signal+10.), fits.Header({'EXPTIME':10.}))
+                    fits.PrimaryHDU(header=source_wcs.to_header()).writeto(root/'wcs'/f'{source.stem}_ugr.fits')
+                    rejected = np.zeros(shape, np.uint8)
+                    if i == 1:
+                        rejected[1, 1] = 1
+                        counts[1, 1] -= 1
+                    write_images(masks/f'{source.stem}.fit', {'MASK':rejected})
+                    records.append(dict(galaxy='m33', band=band, raw_band=raw, setup=setup,
+                                        product_prefix='m33_ugr', source=str(source)))
+                path = root/f'{band}_stack.fit'
+                write_images(path, {'NVALID':counts})
+                frames[band] = dict(path=path, wcs=target_wcs, header={'NCOMBINE':len(signals)})
+            manifest = root/'registration_ugr.json'
+            manifest.write_text(json.dumps(records))
+            points = (np.arange(3), np.ones(3, int), np.array([0, 1, 3]), np.ones(3))
+            pixel, coherent = master_annulus_covariance(frames, 'ur', points, 3, 'm33', manifest, masters.parent)
+            footprint = np.array([[.5,.5,0,0,0], [0,.5,.5,0,0], [0,0,0,.5,.5]])
+            bias = np.vstack([-.1*footprint, -.05*footprint])
+            u_flat = -np.array([4.,3.,4.])[:,None]*footprint
+            r_flat = -5.*footprint
+            expected = 4*bias@bias.T
+            expected[:3,:3] += .01*u_flat@u_flat.T
+            expected[3:,3:] += .04*r_flat@r_flat.T
+            np.testing.assert_allclose(pixel, expected, atol=1e-9)
+            expected_floor = np.zeros_like(expected)
+            expected_floor[:3,:3] = .01**2*np.outer(u_flat.sum(axis=1), u_flat.sum(axis=1))
+            np.testing.assert_allclose(coherent, expected_floor, atol=1e-9)
 
     def test_pixel_area_scaling_for_different_binnings(self):
         from reproject import reproject_interp

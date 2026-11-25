@@ -22,13 +22,21 @@ def ellipse_radius(shape, g):
                     (-x*np.sin(t)+y*np.cos(t))/g['axis_ratio'])
 
 
-def source_masks(frame, table, gcfg, cfg, output):
+def source_masks(frame, table, gcfg, cfg, output, *, gaia=None):
     """Keep strong Gaia evidence in crowded regions; defer other crowded groups."""
     shape = frame['data'].shape
     red = np.zeros(shape, bool); review = np.zeros(shape, bool)
     chosen = np.asarray(table['auto_mask'], bool).copy()
     points = np.column_stack([table['x'], table['y']])
     reason = np.full(len(table), 'review candidate', dtype='U90')
+    radii = np.asarray(table['mask_radius_arcsec'], dtype=float).copy()
+    radius_by_magnitude = gcfg.get('faint_star_mask_radii_arcsec')
+    use_gaia_radii = gaia is not None and radius_by_magnitude is not None
+    if use_gaia_radii:
+        thresholds, faint_radii = zip(*radius_by_magnitude)
+        gaia_g = np.ma.asarray(gaia['phot_g_mean_mag'], dtype=float).filled(np.nan)
+        g_by_id = {f'gaia:{source_id}': mag for source_id, mag in zip(gaia['source_id'], gaia_g)}
+        magnitudes = np.array([g_by_id.get(str(source_id), np.nan) for source_id in table['id']])
     if len(table):
         ids = np.flatnonzero(chosen)
         if len(ids):
@@ -43,15 +51,37 @@ def source_masks(frame, table, gcfg, cfg, output):
                 chosen[j] = not (inside and crowded and not strong_gaia and not manual)
                 reason[j] = ('secure foreground/background evidence' if chosen[j]
                              else 'crowded on-galaxy group without strong Gaia evidence; deferred')
+                if chosen[j] and strong_gaia and use_gaia_radii and np.isfinite(magnitudes[j]):
+                    tier = np.searchsorted(thresholds, magnitudes[j], side='right') - 1
+                    if tier >= 0:
+                        radii[j] = min(radii[j], faint_radii[tier])
         for j, row in enumerate(table):
-            region, weight = pa.aperture_weights(shape, row['x'], row['y'],
-                                                 row['mask_radius_arcsec']/frame['scale'])
+            region, weight = pa.aperture_weights(shape, row['x'], row['y'], radii[j]/frame['scale'])
             if region is not None:
                 (red if chosen[j] else review)[region] |= weight > 0
     audit = table.copy(); audit['radial_masked'] = chosen; audit['radial_reason'] = reason
+    if use_gaia_radii:
+        audit['original_mask_radius_arcsec'] = audit['mask_radius_arcsec'].copy()
+        audit['mask_radius_arcsec'] = radii
+        audit['gaia_g_mag'] = magnitudes
     output = Path(output); output.mkdir(parents=True, exist_ok=True)
     audit.write(output/'source_mask_audit.ecsv', overwrite=True)
     return red, review
+
+
+def science_geometry(reference, frame, cfg):
+    """Use reference bin widths with any science-only center and inner exclusion."""
+    geometry = dict(reference, minimum_annulus_fraction=reference.get(
+        'minimum_annulus_fraction', cfg['minimum_annulus_fraction']))
+    if 'science_center_icrs_deg' in reference:
+        from astropy.coordinates import SkyCoord
+        center = SkyCoord(*reference['science_center_icrs_deg'], unit='deg')
+        geometry['center_xy'] = tuple(float(value) for value in frame['wcs'].world_to_pixel(center))
+    omitted = reference.get('omit_inner_science_annuli', 0)
+    geometry['edges'] = reference['edges'][omitted:]
+    if len(geometry['edges']) < 2:
+        raise ValueError('The inner exclusion must leave at least one science annulus.')
+    return geometry
 
 
 def ellipse_radius_at(xy, g):
@@ -162,7 +192,7 @@ def annulus_weights(shape, gcfg, inner, outer, subpixels):
     return large, None if large is None else mask.data[small]
 
 
-def measure_annuli(frames, sky, red, review, gcfg, cfg, edges, error_paths):
+def measure_annuli(frames, sky, red, review, gcfg, cfg, edges, error_paths, *, native_masters=None):
     """Mean intensity on identical admitted pixels in all bands; never zero-fill holes."""
     bands = tuple(gcfg.get('bands', frames))
     if tuple(sky.get('bands', bands)) != bands:
@@ -171,12 +201,16 @@ def measure_annuli(frames, sky, red, review, gcfg, cfg, edges, error_paths):
     if not 0 < minimum_fraction <= 1:
         raise ValueError('Science annulus coverage must be in (0, 1].')
     nbands = len(bands)
+    if native_masters is not None and any(frame['psf_matched'] for frame in frames.values()):
+        warnings.warn('Native master propagation requires unconvolved frames; using the PSF-matched pixel bound.')
+        native_masters = None
     shape = frames['r']['data'].shape; scale = frames['r']['scale']; n = len(edges)-1
     common = ~red.copy()
     for frame in frames.values(): common &= ~frame['mask']
     area = np.zeros(n); full = np.pi*gcfg['axis_ratio']*np.diff(np.asarray(edges)**2)
     basis = np.zeros((n,3)); mean = np.full((nbands,n),np.nan)
     random = np.zeros((nbands,n)); flat = np.zeros((nbands,n)); review_delta = np.full((nbands,n),np.nan)
+    points = []
     for k,(lo,hi) in enumerate(zip(edges[:-1],edges[1:])):
         sl,w = annulus_weights(shape,gcfg,lo,hi,cfg['annulus_subpixels'])
         if sl is None: continue
@@ -185,12 +219,15 @@ def measure_annuli(frames, sky, red, review, gcfg, cfg, edges, error_paths):
         yy,xx = np.indices(w.shape); xx += sl[1].start; yy += sl[0].start
         basis[k] = [1.,np.sum(w*(xx-(shape[1]-1)/2)/(shape[1]/2))/area[k],
                     np.sum(w*(yy-(shape[0]-1)/2)/(shape[0]/2))/area[k]]
+        if native_masters is not None:
+            use = w > 0
+            points.append((np.full(use.sum(), k), yy[use], xx[use], w[use]/area[k]))
     for j,b in enumerate(bands):
         frame = frames[b]
         # Separate random detector noise from the shared-master bound.
         with fits.open(error_paths[b],memmap=False) as h:
             rand = h['VARRAND'].data if 'VARRAND' in h else h['VAR'].data
-            cal = h['VARCAL'].data if 'VARCAL' in h else np.zeros(shape,np.float32)
+            cal = h['VARCAL'].data if native_masters is None and 'VARCAL' in h else None
             for k,(lo,hi) in enumerate(zip(edges[:-1],edges[1:])):
                 if area[k]==0: continue
                 sl,w = annulus_weights(shape,gcfg,lo,hi,cfg['annulus_subpixels'])
@@ -201,7 +238,8 @@ def measure_annuli(frames, sky, red, review, gcfg, cfg, edges, error_paths):
                     random[j,k] = np.sum(w*np.sqrt(np.where(common[sl],frame['variance'][sl],0)))**2
                 else:
                     random[j,k] = np.sum(w*w*np.where(common[sl],rand[sl],0))*frame.get('correlation_factor',1.)
-                    flat[j,k] = np.sum(w*np.sqrt(np.where(common[sl],cal[sl],0)))
+                    if cal is not None:
+                        flat[j,k] = np.sum(w*np.sqrt(np.where(common[sl],cal[sl],0)))
                 wr = w*~review[sl]
                 if wr.sum() > minimum_fraction:
                     wr /= wr.sum()
@@ -218,14 +256,28 @@ def measure_annuli(frames, sky, red, review, gcfg, cfg, edges, error_paths):
             sky_bound[j] = np.max(np.abs(basis@(sky['alternatives'][:,j]-sky['coefficients'][j]).T),axis=1)
     # Box residuals and mask-choice shifts are coherent sensitivity bounds, not N^-1/2 errors.
     sky_bound = np.maximum(sky_bound,sky['residual_floor'][:,None])
-    total = stat.copy()
+    master_pixel = np.zeros_like(stat)
+    master_coherent = np.zeros_like(stat)
+    if native_masters is not None:
+        if points:
+            from light_reduction import master_annulus_covariance
+            samples = tuple(np.concatenate(values) for values in zip(*points))
+            master_pixel, master_coherent = master_annulus_covariance(frames, bands, samples, n,
+                                                                      **native_masters)
+        flat = np.sqrt(np.diag(master_pixel + master_coherent)).reshape(nbands,n)
+    total = stat + master_pixel
     for j in range(nbands):
         sl = slice(j*n,(j+1)*n)
-        total[sl,sl] += np.outer(flat[j],flat[j])+np.outer(sky_bound[j],sky_bound[j])
+        if native_masters is None:
+            master_coherent[sl,sl] = np.outer(flat[j],flat[j])
+        total[sl,sl] += np.outer(sky_bound[j],sky_bound[j])
+    total += master_coherent
     valid = area/full >= minimum_fraction
     mean[:,~valid] = np.nan
     return dict(bands=bands,minimum_annulus_fraction=minimum_fraction,edges=np.asarray(edges),mean=mean,area=area,full_area=full,
                 valid=valid,covariance=total,stat_covariance=stat,flat_bound=flat,
+                master_pixel_covariance=master_pixel,master_coherent_covariance=master_coherent,
+                native_master_covariance=native_masters is not None,
                 sky_bound=sky_bound,review_sensitivity=review_delta,scale=scale)
 
 
@@ -458,6 +510,12 @@ def save_profiles(profile, photometry, geometry, output, extinction=None):
            'shared_master_bound','sky_model_bound','orange_mask_sensitivity','instrumental_mu','instrumental_mu_error',
            'mu','mu_error','calibration_status','A_MW','above_3sigma']
     table = Table(rows=rows,names=names)
+    if profile.get('native_master_covariance'):
+        for component in ('pixel','coherent'):
+            variance = np.diag(profile[f'master_{component}_covariance'])
+            table[f'master_{component}_error'] = np.sqrt(variance)/profile['scale']**2
+        table.meta['master_error_note'] = ('shared_master_bound is the combined master error; native pixel '
+            'covariance shares each master across exposures and the external flat floor is coherent')
     table['coverage_pass'] = np.tile(profile['valid'], len(bands))
     table['intensity_upper_3sigma'] = np.maximum(table['intensity_ADU_s_arcsec2'],0)+3*table['total_error_bound']
     table.meta.update(bands=list(bands),
@@ -465,12 +523,18 @@ def save_profiles(profile, photometry, geometry, output, extinction=None):
                       surface_brightness='mag/arcsec2; instrumental_mu has arbitrary zero point',
                       extinction_applied=extinction is not None,
                       extinction_columns='correction applies to magnitude columns; intensity columns retain observed values',
-                      error_note='total_error_bound includes conservative coherent master/sky bounds; orange sensitivity separate',
+                      error_note='total_error_bound includes master and sky errors; orange sensitivity separate',
                       covariance_order='band-major: '+','.join(bands),
                       extinction_note='MW only; nominal SDSS coefficients remain provisional for unverified passbands')
+    if 'center_xy' in geometry:
+        table.meta['annulus_center_xy'] = list(geometry['center_xy'])
     table.write(output/'surface_photometry.ecsv',overwrite=True)
+    components = {}
+    if profile.get('native_master_covariance'):
+        components = {f'flux_master_{component}': profile[f'master_{component}_covariance']
+                      for component in ('pixel','coherent')}
     np.savez(output/'covariance.npz',flux=profile['covariance'],flux_stat=profile['stat_covariance'],
-             magnitudes=covariance,instrumental=raw_cov,extinction=delta_cov)
+             magnitudes=covariance,instrumental=raw_cov,extinction=delta_cov,**components)
     return table
 
 

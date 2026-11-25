@@ -471,6 +471,19 @@ def calibrate_exposures(setups, models, root, cfg):
     return records
 
 
+def _bilinear_stencil(sx, sy, shape):
+    finite = np.isfinite(sx) & np.isfinite(sy)
+    sx = np.where(finite, sx, -1); sy = np.where(finite, sy, -1)
+    ix, iy = np.floor(sx).astype(int), np.floor(sy).astype(int)
+    dx, dy = sx-ix, sy-iy
+    ny, nx = shape
+    valid = finite & (ix >= 0) & (iy >= 0) & (ix+1 < nx) & (iy+1 < ny)
+    neighbors = ((np.clip(iy+oy, 0, ny-1), np.clip(ix+ox, 0, nx-1), weight)
+                 for ox, oy, weight in ((0, 0, (1-dx)*(1-dy)), (1, 0, dx*(1-dy)),
+                                        (0, 1, (1-dx)*dy), (1, 1, dx*dy)))
+    return valid, neighbors
+
+
 def resample_noise(variance, calibration_sigma, source_wcs, target_wcs, shape, cfg):
     """Bilinear independent variance uses squared weights, not image interpolation."""
     result_var = np.full(shape, np.nan, np.float32)
@@ -479,16 +492,9 @@ def resample_noise(variance, calibration_sigma, source_wcs, target_wcs, shape, c
     for rows in slices(shape, cfg["chunk_rows"]):
         y, x = np.mgrid[rows.start:rows.stop, :shape[1]]
         sx, sy = pixel_to_pixel(target_wcs, source_wcs, x, y)
-        finite = np.isfinite(sx) & np.isfinite(sy)
-        sx = np.where(finite, sx, -1); sy = np.where(finite, sy, -1)
-        ix, iy = np.floor(sx).astype(int), np.floor(sy).astype(int)
-        dx, dy = sx-ix, sy-iy
-        valid = finite & (ix >= 0) & (iy >= 0) & (ix+1 < variance.shape[1]) & (iy+1 < variance.shape[0])
+        valid, neighbors = _bilinear_stencil(sx, sy, variance.shape)
         v = np.zeros(x.shape); c = np.zeros(x.shape)
-        for ox, oy, weight in ((0, 0, (1-dx)*(1-dy)), (1, 0, dx*(1-dy)),
-                               (0, 1, (1-dx)*dy), (1, 1, dx*dy)):
-            xx = np.clip(ix+ox, 0, variance.shape[1]-1)
-            yy = np.clip(iy+oy, 0, variance.shape[0]-1)
+        for yy, xx, weight in neighbors:
             a, b = variance[yy, xx], calibration_sigma[yy, xx]
             valid &= np.isfinite(a) & np.isfinite(b)
             v += weight**2*np.nan_to_num(a, nan=0)
@@ -497,6 +503,125 @@ def resample_noise(variance, calibration_sigma, source_wcs, target_wcs, shape, c
         result_var[rows] = np.where(valid, v*area_ratio**2, np.nan)
         result_sigma[rows] = np.where(valid, c*area_ratio, np.nan)
     return result_var, result_sigma
+
+
+def _annular_detector_weights(records, target_wcs, points, counts, shape, n, root):
+    """Sparse annulus-by-detector weights for each accepted exposure."""
+    from scipy.sparse import csr_matrix
+
+    annulus, y, x, weight = points
+    accepted_count = np.zeros_like(counts)
+    for record in records:
+        source = Path(record['source'])
+        prefix = record.get('product_prefix') or record['galaxy']
+        suffix = '_ugr' if record.get('product_prefix') else ''
+        mask = fits.getdata(root/'rejection_masks'/prefix/f'{source.stem}.fit', 'MASK', memmap=False)
+        accepted = (mask[y, x] == 0)
+        accepted_count += accepted
+        sky_y, sky_x = y[accepted], x[accepted]
+        header = fits.getheader(root/'wcs'/f'{source.stem}{suffix}.fits')
+        header['NAXIS'], header['NAXIS1'], header['NAXIS2'] = 2, shape[1], shape[0]
+        source_wcs = WCS(header)
+        sx, sy = pixel_to_pixel(target_wcs, source_wcs, sky_x, sky_y)
+        valid, neighbors = _bilinear_stencil(sx, sy, shape)
+        if not valid.all():
+            raise ValueError(f'{source.name}: accepted pixels fall outside the saved detector WCS.')
+        area_ratio = abs(proj_plane_pixel_area(target_wcs) / proj_plane_pixel_area(source_wcs))
+        row = annulus[accepted]
+        base = area_ratio * weight[accepted] / counts[accepted]
+        columns, values = [], []
+        for yy, xx, fraction in neighbors:
+            columns.append(yy*shape[1] + xx)
+            values.append(base*fraction)
+        weights = csr_matrix((np.concatenate(values), (np.tile(row, 4), np.concatenate(columns))),
+                             shape=(n, np.prod(shape)))
+        weights.eliminate_zeros()
+        yield source, weights
+    if not np.array_equal(accepted_count, counts):
+        raise ValueError('Saved rejection masks disagree with accepted exposure counts in the stack.')
+
+
+def _detector_covariance(jacobian, variance):
+    sigma = np.sqrt(variance.ravel()[jacobian.indices])
+    if not np.isfinite(sigma).all():
+        raise ValueError('Missing or invalid master variance on the contributing detector pixels.')
+    jacobian.data *= sigma
+    return (jacobian @ jacobian.T).toarray()
+
+
+def master_annulus_covariance(frames, bands, points, n, galaxy, manifest, masters_dir):
+    """Propagate native bias and flat errors through the fixed WCS and stack selection.
+
+    Distinct detector pixels have independent repeat noise. A pixel's master error
+    is reused in every exposure, including bands with the same bias master. The
+    supplied flat's explicit fractional floor is a separate coherent sensitivity.
+    """
+    from scipy.sparse import csr_matrix, vstack
+
+    manifest = Path(manifest)
+    root = manifest.parent
+    records = [record for record in json.loads(manifest.read_text()) if record['galaxy'] == galaxy]
+    pixel = np.zeros((len(bands)*n, len(bands)*n))
+    coherent = np.zeros_like(pixel)
+    bias_responses = {}
+    _, y, x, _ = points
+    if not len(y):
+        return pixel, coherent
+
+    for j, band in enumerate(bands):
+        frame = frames[band]
+        band_records = [record for record in records if record['band'] == band]
+        if len(band_records) != frame['header']['NCOMBINE']:
+            raise ValueError(f'{band}: registration manifest does not match the number of stack inputs.')
+        counts = fits.getdata(frame['path'], 'NVALID', memmap=False)[y, x]
+        if np.any(counts < 1):
+            raise ValueError(f'{band}: an admitted annulus pixel has no accepted exposures.')
+        groups = {(record['setup'], record['raw_band']) for record in band_records}
+        if len(groups) != 1:
+            raise ValueError(f'{band}: native master propagation requires one detector setup and flat per band.')
+        setup, raw_band = groups.pop()
+        cal_dir = Path(masters_dir)/setup
+        error_dir = root/'uncertainty'/setup
+        model = json.loads((error_dir/'model.json').read_text())['flats'][raw_band]
+        bias = load(cal_dir/'master_bias.fit')
+        flat = load(cal_dir/f'master_flat_{raw_band}.fit')
+        with fits.open(error_dir/f'flat_{raw_band}_uncertainty.fit', memmap=False) as hdus:
+            flat_var = hdus['VAR'].data.ravel().astype(float)
+            floor = float(hdus[0].header.get('FLTFLOOR', 0.))
+        floor_sigma = floor*flat.ravel()
+        flat_var = np.maximum(flat_var - floor_sigma**2, 0.)
+        bias_jac = csr_matrix((n, flat.size))
+        flat_jac = csr_matrix((n, flat.size))
+        for source, weights in _annular_detector_weights(band_records, frame['wcs'], points, counts,
+                                                         flat.shape, n, root):
+            # Only touch detector pixels contributing to an admitted science annulus.
+            native = weights.indices
+            response = flat.ravel()[native].astype(float)
+            with fits.open(source, memmap=False) as hdus:
+                signal = hdus[0].data.ravel()[native].astype(float) - bias.ravel()[native]
+                exposure = float(hdus[0].header['EXPTIME'])
+            if not (np.isfinite(signal).all() and np.isfinite(response).all() and (response > 0).all()):
+                raise ValueError(f'{source.name}: invalid calibration on a contributing detector pixel.')
+            flat_derivative = -signal/(response**2*exposure)
+            bias_derivative = -1/(response*exposure) - model['alpha']*flat_derivative
+            flat_weighted = weights.copy()
+            flat_weighted.data *= flat_derivative
+            weights.data *= bias_derivative
+            flat_jac += flat_weighted
+            bias_jac += weights
+
+        band_slice = slice(j*n, (j+1)*n)
+        response = flat_jac @ floor_sigma
+        coherent[band_slice, band_slice] = np.outer(response, response)
+        pixel[band_slice, band_slice] += _detector_covariance(flat_jac, flat_var)
+        bias_responses.setdefault(setup, {})[j] = bias_jac
+
+    for setup, responses in bias_responses.items():
+        bias_var = fits.getdata(root/'uncertainty'/setup/'bias_uncertainty.fit', 'VAR', memmap=False)
+        zero = csr_matrix((n, bias_var.size))
+        jac = vstack([responses.get(j, zero) for j in range(len(bands))], format='csr')
+        pixel += _detector_covariance(jac, bias_var)
+    return pixel, coherent
 
 
 def register_exposures(records, root, project_dir, cfg, keep_calibrated=False):

@@ -230,6 +230,34 @@ class RadialAnalysisTests(unittest.TestCase):
         np.testing.assert_array_equal(audit['radial_masked'],[False,False,False,True])
         self.assertTrue(red.any() and review.any())
 
+    def test_faint_star_radii_only_shrink_secure_gaia_masks(self):
+        table = Table(dict(
+            id=['gaia:1', 'gaia:2', 'gaia:3', 'gaia:4', 'gaia:5', 'sdss:6'],
+            x=[9., 23., 37., 51., 9., 23.], y=[12., 12., 12., 12., 40., 40.],
+            auto_mask=[True, True, True, True, False, True],
+            classification=['foreground_star']*4 + ['stellar_candidate', 'background_galaxy'],
+            mask_radius_arcsec=[5.]*6))
+        gaia = Table(dict(source_id=[1, 2, 3, 5], phot_g_mean_mag=[16., 17., 20., 20.]))
+        geometry = dict(self.g, faint_star_mask_radii_arcsec=((17., 4.), (20., 2.)))
+        red, review = ra.source_masks(self.frames['r'], table, geometry, self.cfg, self.path, gaia=gaia)
+        audit = Table.read(self.path/'source_mask_audit.ecsv')
+        np.testing.assert_array_equal(audit['mask_radius_arcsec'], [5., 4., 2., 5., 5., 5.])
+        np.testing.assert_array_equal(table['mask_radius_arcsec'], [5.]*6)
+        self.assertTrue(red[12, 37])
+        self.assertFalse(red[12, 40])
+        self.assertTrue(review[40, 12])
+
+    def test_science_geometry_centers_and_excludes_without_changing_reference(self):
+        x, y = 28., 33.
+        center = self.wcs.pixel_to_world(x, y)
+        reference = dict(self.g, edges=[0., 5., 10., 15.], omit_inner_science_annuli=1,
+                         science_center_icrs_deg=(center.ra.deg, center.dec.deg))
+        science = ra.science_geometry(reference, self.frames['r'], self.cfg)
+        np.testing.assert_allclose(science['center_xy'], (x, y), atol=1e-7)
+        self.assertEqual(science['edges'], [5., 10., 15.])
+        self.assertEqual(reference['edges'], [0., 5., 10., 15.])
+        self.assertEqual(reference['center_xy'], self.g['center_xy'])
+
     def test_foreground_cache_and_correlated_color_errors(self):
         from astroquery.ipac.irsa.irsa_dust import IrsaDust
         with patch.object(IrsaDust,'get_query_table',return_value=Table({'ext SFD ref':[.1]})) as query:

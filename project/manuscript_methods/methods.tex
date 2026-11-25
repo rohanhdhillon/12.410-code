@@ -1,0 +1,457 @@
+\section{Methods}
+\label{sec:methods}
+
+After gathering data at MIT's Wallace Observatory with both its Elliot 24-inch telescope and 90-mm refractor, I photometrically calibrated each light frame using a master bias and a master flat, each constructed from median-stacking. Dark frames are omitted. All exposures took 120 to 180 seconds, and the reduction assumes that dark current in the cooled detectors is subdominant over those exposures. Registration of individual light frames and subsequent stacking via a robust IQR-based outlier algorithm produces six stacked light frames, one in each filter for each galaxy. These comprise Sloan $g',r',i'$ for NGC~6503 and inferred $u',g',r'$ for M33 (Section~\ref{sec:filter-mapping}). This paper denotes these as the six \textit{detector configurations}. The M33 $g'$ frame exhibits a noticeable luminosity gradient, which the analysis corrects by fitting a plane to the sky background and subtracting it from the stack. Because a unique telescope-filter combination produced each of these six final frames, I measured its point-spread function (PSF) to account for filter-, telescope-, and seeing-dependent stellar aperture losses.
+
+The analysis then fits a zero-point magnitude to each frame independently, quantifying the error in this fit. After this, it identifies background galaxies and foreground stars whose light needs to be masked before computing any color magnitudes of the galactic disk. Its next step is estimating the sky background \textit{behind the galaxy} by fitting a plane in each band to eligible off-galaxy sky pixels. It then adopts a center, major-axis direction, and published inclination for each galaxy and, assuming the disk is roughly circular in its own plane, constructs elliptical apertures that represent regions of equal radii from its center. The analysis then performs surface photometry in each elliptical annulus, subtracting the sky background, and finally corrects for both the effects of extinction \textit{within the Milky Way} and inclination. Note that the inclination correction shifts the surface brightness in every band by the same amount and cancels in every color difference.
+
+\subsection{Filter mislabeling on Wallace's 90-mm refractor}
+\label{sec:filter-mapping}
+
+Light frames for M33 disagreed with the Sloan stellar fluxes expected from their recorded filter names. To check whether this mismatch arose before stacking, I measured stars directly in the thirty raw science exposures, using the astrometric solutions described in Section~\ref{sec:registration} to place the apertures. I selected clean SDSS DR17 point sources with $14<r<18$ and catalog errors below $0.12$ mag in $u$ and $0.05$ mag in $g,r,i$. Stars had to lie outside the M33 calibration exclusion ellipse (Section~\ref{sec:magcal}) and at least $35\arcsec$ from their nearest catalog neighbor with $0<r<19.5$. The larger $u$ error limit accommodates the lower sensitivity of the catalog in that band while retaining useful flux ratios.
+
+For each star I summed the raw counts in an $18\arcsec$ radius aperture, using fractional pixel weights and subtracting the local sky from a $27\arcsec$--$45\arcsec$ annulus. The sky was the weighted mean of the annulus after three rounds of $3\sigma_{\rm MAD}$ clipping, where $\sigma_{\rm MAD}$ is $1.4826$ times the median absolute deviation about the median. I divided the aperture sum by the exposure time and discarded stars with an aperture pixel at or above $60{,}000$ ADU, incomplete apertures, or a mean rate less than eight times its standard error across the ten repeats in a given series. The local subtraction removes the bias level to first order and permits this check to use the raw frames directly. Residual pixel response and local background structure can still add scatter.
+
+I compared each median instrumental rate $f_j$ to the rate $f_0$ of a reference star in the same exposure series. The relative flux expected for a candidate filter $\lambda$ was
+\begin{equation}
+    \frac{F_{\lambda,j}}{F_{\lambda,0}}
+    =10^{-0.4(m_{\lambda,j}-m_{\lambda,0})}.
+    \label{eq:filter-ratios}
+\end{equation}
+The catalog stars are bright enough for the logarithmic approximation to SDSS PSF magnitudes. For each candidate filter I took $\sigma_{\rm MAD}$ of the flux-ratio residual in magnitudes over all eligible stars,
+\[
+    \Delta m_j=-2.5\log_{10}\frac{f_j/f_0}{F_{\lambda,j}/F_{\lambda,0}}.
+\] The scatter is independent of the choice of reference star because changing it shifts every residual by a constant. Table~\ref{tab:filter-ratios} shows examples spanning the stars' $g-r$ colors and reports the full-sample scatter for each candidate.
+
+The full-sample residuals favor $u'$ for the header-$g'$ exposures, $g'$ for the header-$r'$ exposures, and $r'$ for the header-$i'$ exposures. In that order, the preferred bands give scatters of 0.299, 0.117, and 0.083 mag, compared with 0.372, 0.204, and 0.155 mag for the recorded bands. The $u'$ assignment is the least secure. Its scatter is only 0.025 mag below that obtained by comparison with catalog $r'$, the next best candidate in that series. Taken together the stellar measurements support a one-band shift toward the blue in the recorded sequence.
+
+\begin{deluxetable*}{lcccc}[t]
+\tablecaption{M33 stellar flux ratios by recorded filter\label{tab:filter-ratios}}
+\tabletypesize{\footnotesize}
+\tablewidth{0pt}
+\tablehead{
+\colhead{SDSS DR17 object ID} & \colhead{$g-r$ (mag)} & \colhead{Instrumental $f/f_0$} &
+\colhead{Catalog, FITS band} & \colhead{Catalog, adopted band}}
+\startdata
+\cutinhead{FITS $g'$ compared with catalog $g'$ and $u'$ ($N=39$)}
+1237680314450378773 & 0.422 & 1.000 & 1.000 & 1.000 \\
+1237679581082353735 & 0.369 & $0.820\pm0.372$ & 0.762 & 0.790 \\
+1237680315523792979 & 0.421 & $0.911\pm0.236$ & 1.313 & 1.133 \\
+1237680314987249676 & 0.479 & $0.911\pm0.305$ & 0.584 & 0.581 \\
+1237680315523661962 & 0.725 & $0.745\pm0.263$ & 0.231 & 0.123 \\
+\cutinhead{FITS $r'$ compared with catalog $r'$ and $g'$ ($N=258$)}
+1237680314449854500 & 0.536 & 1.000 & 1.000 & 1.000 \\
+1237680313913507973 & 0.386 & $1.097\pm0.178$ & 1.001 & 1.150 \\
+1237679581082222777 & 0.469 & $2.336\pm0.198$ & 2.189 & 2.328 \\
+1237680314987249717 & 0.620 & $0.299\pm0.116$ & 0.417 & 0.386 \\
+1237680313913573434 & 0.839 & $0.683\pm0.101$ & 0.735 & 0.556 \\
+\cutinhead{FITS $i'$ compared with catalog $i'$ and $r'$ ($N=364$)}
+1237679581082419284 & 0.604 & 1.000 & 1.000 & 1.000 \\
+1237680313913507850 & 0.390 & $1.602\pm0.083$ & 1.556 & 1.612 \\
+1237680314987184181 & 0.500 & $0.271\pm0.076$ & 0.290 & 0.288 \\
+1237679580545548522 & 0.705 & $0.234\pm0.047$ & 0.217 & 0.215 \\
+1237680286533681308 & 1.149 & $0.181\pm0.034$ & 0.288 & 0.220
+\enddata
+\tablecomments{The first row of each group is the reference star. Among the top quartile in repeat signal-to-noise, it is the star closest to the sample's median instrumental-to-catalog offsets across the four candidate bands, using the median absolute offset from those medians. The other rows sample the 10th, 35th, 65th, and 90th percentiles of catalog $g-r$. The instrumental column is a ratio of median rates. Its uncertainties show the exposure-to-exposure standard deviation of the ratio. Catalog values follow Equation~\ref{eq:filter-ratios}. Across the full samples, the reduced scatter favors identifying the FITS $g'$ images as $u'$, with $g'$ and $r'$ preferred for the FITS $r'$ and $i'$ images.}
+\end{deluxetable*}
+
+The rest of this analysis proceeds by assuming that the selected $g',r',i'$ filters for the 90-mm refractor were actually $u',g',r'$ filters. The stellar measurements favor this assignment. The physical wheel positions were still awaiting independent verification from the observatory when the analysis was performed. Calibration files are matched by the original FITS keys, and the revised band names are used for the reduction products and the remainder of this paper.
+
+\subsection{Gathering Data}
+\label{sec:observations}
+
+I took images of M33 and NGC~6503 at the MIT Wallace Observatory, using the observatory's 90-mm refractor (mounted on \textit{Pier 1}) and Elliot 24-inch telescope, respectively. These were chosen because the large size of M33 required a wide field. Its published red-band disk scale length of $9.6\arcmin$ corresponds to an exponential half-light radius of about $16\arcmin$ (Section~\ref{sec:half-light}). The refractor's approximately $90\arcmin\times90\arcmin$ field at a focal length of 432 mm accommodates the galaxy out to $2R_e$ in one pointing, including sky for background estimation. A larger mosaic of refractor pointings could extend the radial coverage. NGC~6503, meanwhile, is much fainter in total apparent light than M33, and the light-collecting power of the Elliot 24-inch telescope reduced the integration time needed to reach useful per-pixel signal. Its uncropped field spans about $38\arcmin\times28\arcmin$. \citep{methWallace,methKent}
+
+The two nights that supplied science frames are listed in Table~\ref{tab:observations}. The usable stacks contain nine or ten frames per filter. For NGC~6503, Sloan $g'$ and $r'$ required two minutes of integration time per frame, while Sloan $i'$ used three minutes per frame. For M33, inferred $g'$ used two minutes and inferred $u'$ and $r'$ used three minutes. While using a Sloan $i'$ frame is optional for $g'-r'$ photometry, it is useful in galactic color photometry because the redder baseline is less sensitive to dust extinction than the bluer bands. For example, the adopted Milky Way extinction law gives about half as much extinction in $i'$ as in $g'$ at fixed reddening (Section~\ref{sec:extinction}). I used 30 zero-second biases for the Elliot and 20 at each refractor binning.
+
+\begin{deluxetable*}{llcccccc}[t]
+\tablecaption{Science observing log\label{tab:observations}}
+\tabletypesize{\small}
+\tablewidth{0pt}
+\tablehead{
+\colhead{Galaxy} & \colhead{UT date} & \colhead{FITS band} & \colhead{Adopted band} &
+\colhead{Binning} & \colhead{$N_{\rm use}/N_{\rm raw}$} & \colhead{$t_{\rm exp}$ (s)} &
+\colhead{Total (min)}}
+\startdata
+NGC~6503 & 2026 Oct 07 & $g'$ & $g'$ & $1\times1$ & $10/11$ & 120 & 20 \\
+         &             & $r'$ & $r'$ & $1\times1$ & $9/10$  & 120 & 18 \\
+         &             & $i'$ & $i'$ & $1\times1$ & $9/10$  & 180 & 27 \\
+M33      & 2026 Oct 21 & $g'$ & $u'$ & $3\times3$ & $10/10$ & 180 & 30 \\
+         &             & $r'$ & $g'$ & $1\times1$ & $10/10$ & 120 & 20 \\
+         &             & $i'$ & $r'$ & $3\times3$ & $10/10$ & 180 & 30
+\enddata
+\tablecomments{Totals give the exposure time of the accepted input frames before pixel rejection. One $1\,\mathrm{MHz}$ frame in each NGC~6503 filter was excluded from the Long Exposure Mode science set. The M33 $g'$ header row lists the $3\times3$ sequence. A separate $1\times1$ pilot exposure with the same header band was excluded because its matching flats were too weak. The FITS field \texttt{OBJECT} was used to distinguish targets in files bearing similar names.}
+\end{deluxetable*}
+
+For $g'$ and $r'$, these integrations were sufficient to measure common-area radial intensities above the adopted $3\sigma$ threshold in 29 and 31 of 35 annuli for NGC~6503 and in 21 and 24 of 24 annuli for M33, respectively (Section~\ref{sec:photometry}). The reach depends on the band, the sky uncertainty, and the available area. Settings for NGC~6503's observations were uniform across colors. I used $1\times1$ binning, a QHY461 CMOS camera at a $-10^{\circ}$C set point, and a $11664\times8748$ full-frame readout in Long Exposure Mode. The usable airmass range was $1.26$--$1.41$.
+
+For M33, I used a QHY533M CMOS camera at a $-15^{\circ}$C set point. The inferred $g'$ sequence used $1\times1$ binning ($3008\times3008$ pixels, about $1\farcs79$ per pixel). The inferred $u'$ and $r'$ sequences used $3\times3$ binning ($1002\times1002$ samples, about $5\farcs38$ per sample). The coarser sampling aggregates signal over nine unbinned pixels and is still small compared to the widths of the adopted galaxy annuli. The unbinned frames preserve finer sampling for the astrometric reference. The usable M33 airmass range was $1.04$--$1.27$.
+
+\subsection{Calibration}
+\label{sec:detector-calibration}
+
+MIT provided flat frames for the original $g',r',i'$ filter labels for each of the two telescopes used. I paired them with the biases from the respective observing sequences to account for the electronic offset and its dependence on detector settings. The pipeline matches camera and telescope identifiers, image shape, binning, subframe origin, cooler set point, and temperatures within $0.5^{\circ}$C. When recorded on both inputs, the readout modes must agree. Some calibration inputs lack this keyword, and the pipeline flags that metadata gap in the calibrated FITS headers. The bias is shared by filters from the same camera and binning, while flats are specific to the detector configuration. The accepted October 28 flats supplied ten images per configuration except in the nominal refractor $g'$ band.
+
+For each detector setup, the pipeline constructs a master bias from the pixel-wise median of the bias frames. It similarly constructs a master flat by first subtracting the master bias from each flat, normalizing each flat by its median pixel value, and then median-combining the normalized frames. The final master flat is renormalized to have a median of one. The normalization of each input uses finite, positive bias-subtracted pixels below the raw saturation level of $65{,}535$ ADU and requires at least half the image to qualify. A median signal below 500 ADU above bias flags a flat sequence as weak.
+
+The original flat sequence labeled $g'$ was too weak for the refractor science exposures in that wheel position. For the $3\times3$ data, I used the observatory's replacement master, \path{MasterFlat_Pier1Refractor_20261115_gp_3x3.fits}, which is already bias-subtracted and normalized. Its FITS history records ten 15-s twilight flats with median signals of 5,884--9,664 ADU above bias and a separate $3\times3$ bias. Its raw label therefore matches the science sequence provisionally assigned to $u'$. I masked column 0, a known no-data column in the individual twilight flats, and treated the flat's uncertainty as provisional. The variance model combines an estimate based on photon and read noise with an assumed 1\% fractional sensitivity floor. The $1\times1$ master in the same nominal band had a median of only 120 ADU above bias, so the corresponding pilot exposure was excluded.
+
+Calibration of light frames required a standard subtraction by biases and division by the normalized, bias-subtracted flat.
+\begin{equation}
+    L' = \frac{L-B}{\widehat{F}},
+    \qquad
+    S = \frac{L'}{t_{\rm exp}}.
+    \label{eq:detector-cal}
+\end{equation}
+Here $L'$ is a calibrated light frame in ADU, $L$ is the original frame, $B$ is the master bias, $\widehat F$ is the normalized master flat, and $S$ is the count rate in ADU~s$^{-1}$. The normalization makes frames with different exposure lengths comparable. To identify hot pixels and local response defects, the pipeline subtracts a $3\times3$ median-filtered image from each master. It flags positive bias residuals above the larger of 10 ADU and $8\sigma_{\rm MAD}$, and absolute residuals in the usable normalized flats above the larger of 0.20 and $8\sigma_{\rm MAD}$. Invalid flat response, response outside $[0.5,1.5]$, and raw pixels at or above $65{,}535$ ADU are also flagged. Flagged pixels are excluded from the registered images.
+
+I estimated the read noise from the median positive per-pixel standard deviation among the biases, and the gain from differences of well-illuminated paired flats. For the gain, the second flat was scaled to the first by the ratio of their median signals in the central $512\times512$ pixels, and low spatial frequencies were removed from the difference with a 51-pixel running mean. Comparing the shot-noise variance after accounting for the read noise to the mean counts gave gains of 0.330, 0.396, and 0.384 e$^-$/ADU for the Elliot, unbinned refractor, and $3\times3$ refractor. Their read noises were 3.63, 6.79, and 22.66 ADU per stored pixel, respectively. The repeat variances of the median master files use the Gaussian approximation $\pi/(2N)$ times the variance among the $N$ inputs. The single-exposure noise model propagates shot noise and read noise independently across exposures. The master biases and flats are reused, so their errors are carried as shared terms. The linearized bias error accounts for the same bias entering both the light subtraction and the flat construction.
+
+\subsection{Registration}
+\label{sec:registration}
+
+Because each frame was relatively large, the analysis registered each frame using a measured World Coordinate System (WCS). The pipeline first plate-solves a reference exposure for each galaxy with a local Astrometry.net index from the 5206 series \citep{methLang}. The reference images were NGC~6503's $g'$ exposure ending in \texttt{00000099} and M33's unbinned image labeled $r'$, ending in \texttt{00000999}. The NGC~6503 frame supplies a reference star field even though its separate readout mode excludes it from the science coadd. For M33, the solver searches within $2^{\circ}$ of the header pointing, with a plate-scale range of $\pm30\%$ around the scale implied by the pixel size and focal length. The resulting solutions have log odds of 313 for NGC~6503 and 1023 for M33.
+
+The analysis transfers the measured reference WCS to every science exposure by star matching. It extracts up to 300 bright, compact stars with SEP \citep{methBarbary}, working on a block-averaged copy for detection when needed and converting the centroids back to native pixels. An Astroalign asterism match \citep{methBeroiz} supplies the initial alignment. The pipeline then identifies unique reference counterparts within six reference pixels and assigns them sky coordinates using the reference WCS. Astropy fits the native centroids to those coordinates with a tangent-plane projection and second-order SIP distortion. The pipeline refits after rejecting residuals above the larger of 0.5 native pixels and $4\sigma_{\rm MAD}$, for up to four clipping iterations. A minimum of 12 matched stars and an RMS residual below two native-image pixels ensure reasonable registration accuracy. This RMS is the square root of the mean squared two-dimensional distance between a matched star's measured and WCS-predicted detector positions. Figure~\ref{fig:registration} shows two registered exposures, and Table~\ref{tab:registration} summarizes the inliers and residuals across all exposures.
+
+\begin{figure*}[t]
+    \plotone{figures/registration.pdf}
+    \caption{Checks of the astrometric registration on representative $r'$ science exposures. Panel (a) shows NGC~6503 exposure \texttt{00000120} and panel (b) shows M33 exposure \texttt{00001083}, labeled $i'$ in the raw header. Circles mark reference-star positions with a detected counterpart within two reference pixels after WCS transfer, restricted to the plotted footprints. Table~\ref{tab:registration-stars} lists the six labeled examples. Table~\ref{tab:registration} summarizes the inliers actually used in the native-image fits. The compass arrows and angular scale bars follow the solved WCS.}
+    \label{fig:registration}
+\end{figure*}
+
+\begin{deluxetable}{lrrrrr}[t]
+\tablecaption{Examples of matched stars in the registration check\label{tab:registration-stars}}
+\tabletypesize{\footnotesize}
+\tablewidth{0pt}
+\tablehead{
+\colhead{Star} & \colhead{$x$ (pix)} & \colhead{$y$ (pix)} &
+\colhead{R.A. (deg)} & \colhead{Decl. (deg)} & \colhead{Residual (pix)}}
+\startdata
+A1 & 4777.01 & 5181.13 & 267.576567 & 70.191035 & 0.384 \\
+A2 & 6457.54 & 3563.95 & 267.304458 & 70.105055 & 0.112 \\
+A3 & 7069.79 & 4879.09 & 267.209761 & 70.176666 & 0.168 \\
+B1 & 156.46 & 710.77 & 23.937644 & 31.235228 & 0.139 \\
+B2 & 483.29 & 215.45 & 23.074201 & 30.749090 & 0.171 \\
+B3 & 766.23 & 728.89 & 23.963113 & 30.324752 & 0.130
+\enddata
+\tablecomments{Native centroids are zero-based. ICRS coordinates are from the reference stars. The residual is the distance from the centroid to the reference star projected with the fitted WCS.}
+\end{deluxetable}
+
+\begin{deluxetable}{llcc}[t]
+\tablecaption{Registration quality by band\label{tab:registration}}
+\tabletypesize{\footnotesize}
+\tablewidth{0pt}
+\tablehead{\colhead{Galaxy} & \colhead{Band} & \colhead{Matched stars} & \colhead{RMS (native pixels)}}
+\startdata
+NGC~6503 & $g'$ & 234--257 & 0.216--0.278 \\
+NGC~6503 & $r'$ & 209--242 & 0.250--0.323 \\
+NGC~6503 & $i'$ & 185--214 & 0.250--0.360 \\
+M33 & $u'$ & 114--124 & 0.230--0.263 \\
+M33 & $g'$ & 278--300 & $<0.001$--0.077 \\
+M33 & $r'$ & 255--263 & 0.214--0.246
+\enddata
+\tablecomments{Ranges are across the registered science exposures. M33's $g'$ range includes the reference exposure registered against itself.}
+\end{deluxetable}
+
+The analysis then bilinearly resamples the calibrated images to the reference grid for each galaxy. For NGC~6503 it restricts the grid to $4000\leq x<8500$ and $2500\leq y<6000$ in zero-based reference pixels, retaining the entire galaxy and the sky apertures. For M33 it uses the full $3008\times3008$ unbinned grid, preserving the unbinned band's sampling at $1\farcs791$ per pixel while putting every band on the same coordinate system. The NGC~6503 scale is $0\farcs195$ per pixel. Count rates are multiplied by the ratio of output to input projected pixel area to preserve the surface-brightness scale through resampling. Independent variances use squared interpolation weights and shared calibration errors use a linear bound. Adjacent output pixels share input samples, which is accounted for later with blank-aperture measurements.
+
+\subsection{Stacking}
+\label{sec:stacking}
+
+Stacking combines the nine or ten calibrated frames per filter into a single frame. The stack needs to be resilient to outliers, especially with so few frames per filter per galaxy. A pixel-wise $3\sigma$ rejection rule using the mean and sample standard deviation of the same exposures cannot flag a single measurement in these stacks. For $n$ measurements, the maximum possible deviation from the sample mean in units of the sample standard deviation is $(n-1)/\sqrt{n}$. For $n=10$, this is $2.85<3$.
+
+Therefore, I designed a stacking algorithm that computed an inter-quartile range (IQR) map for each set of exposures and took the \textit{mean} of values that were within 2.5 IQRs of the \textit{median} of the original pixels. At each grid pixel, the pipeline calculates the 25th, 50th, and 75th percentiles of the finite values with linear interpolation between adjacent sorted samples and keeps exposure $j$ when
+\begin{equation}
+    |S_j-Q_{50}| \le 2.5\,(Q_{75}-Q_{25}).
+    \label{eq:iqr}
+\end{equation}
+It saves the mean and sample standard deviation of the survivors and records the number of contributing and rejected exposures. An input mask code of 0 means accepted, 1 means IQR-rejected, and 2 means invalid or outside the footprint. The median-IQR rule avoids estimating the threshold from an outlier-sensitive mean and standard deviation. Under independent Gaussian noise with scale $\sigma$, the standard deviation of an untrimmed mean is $\sigma/\sqrt{n}$, compared with approximately $\sqrt{\pi/2}\,\sigma/\sqrt{n}$ for a sample median at large $n$. This ideal comparison suggests about 20\% lower scatter for a mean. The measured comparison below allows for the actual clipping and small sample sizes.
+
+Minimizing pixel-wise uncertainty is particularly important for galactic flux estimation. In the $r'$ annulus spanning $0.1$--$0.3R_e$, the mean signal on the admitted common pixels of NGC~6503 and M33 was 123\% and 25\% above the fitted sky, respectively. At $1.5$--$2R_e$, the same ratios fell to 11\% and 2.1\%. Thus even modest sky or detector residuals can contribute a substantial fraction of the inferred outer-disk light.
+
+The stack error map uses the larger of the propagated independent exposure variance and the empirical surviving-exposure variance divided by the number of survivors. For $n$ survivors with sample variance $s_S^2$, independent variance $v_j$, and shared-master error bound $c_j$ in each exposure, the reported pixel variance is
+\begin{equation}
+    V_{\rm stack} =
+    \max\!\left(\frac{\sum_j v_j}{n^2},\frac{s_S^2}{n}\right)
+    +\left(\frac{\sum_j c_j}{n}\right)^2.
+    \label{eq:stack-var}
+\end{equation}
+Keeping the larger of the two random terms guards against excess temporal scatter while avoiding double-counting the same noise. The shared term permits the same master error to affect every exposure.
+
+I estimated the change relative to a simple median coadd by paired resampling of the registered exposures. In each band I drew 8,192 fully covered pixels from the source-masked sky regions of Section~\ref{sec:sky} and drew 512 sets of $N$ exposures with replacement, using the same indices for both estimators in each draw and random seed 6503. I computed the inter-draw standard deviation of each estimator at each pixel and took its median over those pixels. The IQR mean lowered this measure of scatter by an average of 17.2\% across the six bands. Table~\ref{tab:stacking} gives the six individual comparisons and the median propagated pixel errors. The resampling measures temporal repeatability on the sampled pixels. Systematic errors common to all exposures are assessed separately in Equation~\ref{eq:stack-var} and Section~\ref{sec:photometry}.
+
+\begin{deluxetable*}{llccccc}[t]
+\tablecaption{Stacking diagnostics and comparison with a median coadd\label{tab:stacking}}
+\tabletypesize{\small}
+\tablewidth{0pt}
+\tablehead{
+\colhead{Galaxy} & \colhead{Band} & \colhead{Rejected (\%)} & \colhead{Stack $\sigma$} &
+\colhead{Median scatter} & \colhead{IQR mean scatter} & \colhead{Reduction (\%)}}
+\startdata
+NGC~6503 & $g'$ & 2.29 & 0.05636 & 0.06265 & 0.05435 & 13.3 \\
+NGC~6503 & $r'$ & 3.30 & 0.04773 & 0.05778 & 0.04679 & 19.0 \\
+NGC~6503 & $i'$ & 3.73 & 0.02967 & 0.04056 & 0.03383 & 16.6 \\
+M33      & $u'$ & 2.26 & 0.00891 & 0.00825 & 0.00701 & 15.1 \\
+M33      & $g'$ & 2.16 & 0.14870 & 0.16993 & 0.14586 & 14.2 \\
+M33      & $r'$ & 0.61 & 0.08145 & 0.06437 & 0.04830 & 25.0
+\enddata
+\tablecomments{Rejected is the fraction of finite exposure samples excluded by the IQR rule across the registered image. The middle three columns are in ADU~s$^{-1}$. Stack $\sigma$ is the field median of the propagated error map before the additional M33 $g'$ background fit. The next two columns give the two exposure-bootstrap scatter estimates, with fractional reduction computed from their ratio.}
+\end{deluxetable*}
+
+Figure~\ref{fig:rejection} shows the accumulated exposure-level rejection masks. The rejection percentages span 0.61\%--3.73\% of finite samples, so most inputs remain available to the mean. Rejections vary across the field, and pixels without full registered coverage occupy a distinct, dark region in the figure. This check helps distinguish rejection by the estimator from holes already present in the detector masks or footprints.
+
+\begin{figure*}[t]
+    \plotone{figures/iqr_rejection.pdf}
+    \caption{Number of exposures removed at each fully covered pixel by the $2.5$-IQR rule. A value of zero means that all input values were retained. The dark gray footprint and bad-pixel regions have fewer than $N_{\rm use}$ finite registered samples and are shaded separately. Most finite samples survive the rule in every band (Table~\ref{tab:stacking}).}
+    \label{fig:rejection}
+\end{figure*}
+
+\subsection{M33 \texorpdfstring{$g'$}{g-prime} correction}
+\label{sec:m33-background}
+
+M33's $g'$ stacked light frame, labeled $r'$ at acquisition, had a clear flux gradient and a distinct feature near the right edge. Failing to correct for this gradient would have resulted in inaccurate background-sky estimation and therefore inaccurate $g'$ surface brightness for M33. I therefore fit a residual additive background to the M33 $g'$ stacked light frame only. The fit uses clipped means in large sky boxes, with stars, invalid and low-coverage pixels, the extended galaxy, and the problematic rightmost 300 columns excluded.
+
+I used pixels with finite science and variance values and at least eight surviving exposures. To find stars, I generated a local SEP background on a 128-pixel mesh, detected sources at $3\sigma$ over at least five connected pixels, and dilated the segmentation of compact sources (both SEP axes shorter than 20 pixels) by eight pixels. The small source-detection background is used to find stars and mask them when computing the background gradient. A large ellipse centered at $(1655.5,1367.5)$, with semiaxes $(1300,900)$ pixels expanded by a factor of 1.15 and an angle of $156.8^{\circ}$ from image $+x$, excludes diffuse galaxy light from the fit.
+
+The pipeline places $96\times96$-pixel sky boxes on a $24\times24$ grid and uses boxes retaining at least 70\% valid pixels both before and after three rounds of $3\sigma_{\rm MAD}$ clipping. It fits the clipped mean at the mean position of the surviving pixels in each box, weighting each box equally. The analysis then subtracts the fitted plane
+\begin{equation}
+    B(x,y)=a+bX+cY,
+    \label{eq:bg-plane}
+\end{equation}
+with coordinates
+\[
+    X=\frac{x-(n_x-1)/2}{n_x/2},
+    \qquad Y=\frac{y-(n_y-1)/2}{n_y/2},
+\]
+where $n_x,n_y$ are the image dimensions. Thus $X,Y$ range approximately from $-1$ to $1$. The box fit clips residuals at $3.5\sigma_{\rm MAD}$ about their median for up to eight iterations and requires at least 50 boxes. A plane captures the dominant large-scale variation with only three coefficients, limiting the fit's ability to absorb the diffuse galaxy outskirts. The 187 retained boxes gave $(a,b,c)=(12.642,-0.218,-0.080)$ ADU~s$^{-1}$ and a residual RMS of 0.053 ADU~s$^{-1}$ (Figure~\ref{fig:m33-background}).
+
+\begin{figure*}[t]
+    \plotone{figures/m33_background.pdf}
+    \caption{Additive background correction of M33's inferred $g'$ coadd. Panels (a) and (b) use identical linear stretches of $-0.36$ to $+0.36$ ADU~s$^{-1}$ and a $4\times4$-pixel block average for display. The original image is offset by its fitted constant $a$ for display. Panel (b) shows the science image after subtraction of the full plane, with the excluded right edge shaded. Panel (c) shows the accepted sky-box rates before and after subtraction, after removing $a+cY$ for the before points. The fitted $bX$ trend is orange. The residual boxes cluster about zero, with some remaining spatial structure.}
+    \label{fig:m33-background}
+\end{figure*}
+
+The uncertainty in the fit is estimated by 400 bootstrap resamplings of $512\times512$-pixel blocks of sky boxes to account for spatial correlations. I also fit two alternative galaxy-mask scales, 1.00 and 1.30, and kept the larger change from the adopted plane at each pixel as a sensitivity measure. The corrected image, masks, sky boxes, and coefficient covariance are saved in \path{reduction/stacks/m33_ugr_g_background_corrected.fit}. Masked sky-fit pixels within the galaxy remain eligible for galaxy photometry if they meet the science-image validity cuts. The right edge and low-coverage pixels stay excluded in the corrected image.
+
+While this procedure likely improved the accuracy of $g'$ surface photometry of M33, the stacked frame's original gradient suggests there might have been errors in the light or calibration frames that may have propagated to this paper's final results. A time-dependent background could have affected which samples were rejected during stacking, before the plane was removed. A multiplicative illumination error in the flat could also bias galaxy intensities even where the additive sky gradient has been subtracted. The origin of the gradient remains uncertain.
+
+\subsection{Point-spread function and aperture corrections}
+\label{sec:psf}
+
+After preparing the M33 $g'$ correction, the analysis determined the point-spread function (PSF) for each detector configuration independently. The PSF determines how much light from a theoretical point source spreads across neighboring pixels. In this paper, measuring the different PSFs in different filters allows the analysis to correct for differences in the fraction of stellar light captured during magnitude calibration. Differences in image PSFs also affect the galaxy photometry. For example, if the $r'$ frame has a wider PSF than the $g'$ frame, then the analysis could underestimate $g'-r'$ in the galaxy's center and overestimate it further out, creating an artificial color gradient. The PSF of M33 $g'$ is measured on the original coadd. Its smooth additive background is removed locally around each star, and the original coadd retains more valid pixels in the stellar stamps.
+
+The pipeline's PSF-fitting algorithm first identifies suitable stars. It detects sources exceeding a $5\sigma$ threshold in at least five connected pixels after estimating a local background on a 128-pixel SEP mesh. It then selects relatively round, isolated stars with signal-to-noise ratios exceeding 50 and major-to-minor axis ratios below 1.5. The algorithm also excludes flagged detections, detections with a major-axis dispersion at or below 0.7 pixels, sources within the galaxy exclusion ellipse, and sources with a neighbor within twice the stamp radius. A stamp must have at least 99.5\% valid pixels, with all of its central $5\times5$ pixels valid. Finally, it rejects stellar profiles without a stable outer flux plateau, since these may indicate contamination or incomplete measurements of the star's light. Visual inspection provides an additional check for saturation and blending.
+
+The algorithm then performs aperture photometry on each passing candidate. It first extracts a square image centered on the star, extending to a radius of $8\arcsec$ for NGC~6503 and $36\arcsec$ for M33, rounded up to a whole pixel. After estimating and subtracting the local background from the median valid pixels beyond 80\% of the stamp radius, it shifts the centroid to the center of the stamp and measures the total flux within 45 progressively larger circular apertures. Apertures range from 0.5 pixels to 70\% of the stamp radius and use fractional pixel overlap. These measurements produce a \textit{curve of growth}, the fraction of a star's total measured light enclosed as a function of aperture radius. The algorithm estimates total stellar flux from the plateau of this curve, requiring the final and fifth-from-last measurements to agree within 3\%, with a maximum overshoot of 5\% above the plateau anywhere in the curve. The aperture radii are measured from the brightest passing stars, up to 60 per band.
+
+Using these fits, the algorithm identifies the radius $R_{95}$ enclosing 95\% of each star's measured light. It then determines a representative radius for each filter using the median of the accepted stellar radii, converting between pixels and arcseconds using the WCS pixel scale. Because the PSF can also vary across a frame, the pipeline separately estimates these radii from the median growth curves in projected radial zones. The zone edges are $(0,60,180,600)\arcsec$ for NGC~6503 and $(0,600,1500,5000)\arcsec$ for M33. A zone requires at least five suitable stars to estimate its own curve and otherwise uses the field-wide curve. Table~\ref{tab:psf} reports the field-wide results, and Figure~\ref{fig:stellar-growth} shows the curves.
+
+\begin{deluxetable}{llccc}[t]
+\tablecaption{Empirical stellar aperture radii\label{tab:psf}}
+\tabletypesize{\footnotesize}
+\tablewidth{0pt}
+\tablehead{
+\colhead{Galaxy} & \colhead{Band} & \colhead{Stars used} &
+\colhead{$R_{95}$ (pix)} & \colhead{$R_{95}$ (arcsec)}}
+\startdata
+NGC~6503 & $g'$ & 56 & 19.85 & 3.86 \\
+NGC~6503 & $r'$ & 60 & 20.56 & 4.00 \\
+NGC~6503 & $i'$ & 57 & 20.43 & 3.98 \\
+M33 & $u'$ & 11 & 7.87 & 14.10 \\
+M33 & $g'$ & 32 & 4.90 & 8.78 \\
+M33 & $r'$ & 12 & 7.63 & 13.67
+\enddata
+\tablecomments{$R_{95}$ denotes the median stellar radius enclosing 95\% of the measured plateau flux. The pixel radii use the common registered-image grids.}
+\end{deluxetable}
+
+\begin{figure*}[t]
+    \plotone{figures/stellar_growth.pdf}
+    \caption{Median stellar curves of growth from the individual accepted stars in Table~\ref{tab:psf}. Each star's growth curve is normalized by its own measured plateau flux before taking the median. The dotted line marks the 95\% enclosed-flux level. The different panel ranges reflect the different angular sampling and measured PSFs.}
+    \label{fig:stellar-growth}
+\end{figure*}
+
+Finally, the pipeline selects a common angular stellar aperture radius across the three filters, using the largest measured $R_{95}$ in each region. For magnitude calibration, it corrects the flux measured within this common aperture by dividing by the fraction of total light enclosed according to the corresponding filter's field-wide PSF curve. This reduces filter-dependent aperture errors when comparing instrumental stellar magnitudes with catalog magnitudes. The galaxy images retain their individual PSFs, so some PSF-dependent uncertainty remains in the radial surface-brightness profiles.
+
+\subsection{Magnitude calibration}
+\label{sec:magcal}
+
+Because the aim of this paper is to compare color profiles across galaxies with images from different telescopes, the analysis must translate the instrumental magnitudes obtained from Wallace into calibrated magnitudes, using reference stars.
+
+The analysis references SDSS DR17 for M33 and APASS DR9 for NGC~6503 (due to insufficient SDSS coverage) to obtain a list of stars that might be within a given frame \citep{methDR17,methAPASS}. The initial queries returned 68,735 and 52 catalog objects, respectively, although only a small subset ultimately qualified for calibration. The SDSS query tiles the footprint with 30-arcmin spacing, retrieves primary detections and native PSF magnitudes, merges repeated SDSS object IDs, and selects positions on the common grid. The APASS query retrieves Sloan $g'r'i'$ from VizieR catalog \texttt{II/336/apass9}. I fit to the catalog's observed magnitudes. The foreground extinction correction is introduced only for the galaxy photometry.
+
+The pipeline matches catalog positions to detected stars within $2\arcsec$, excluding blended sources and restricting the standards to clean stellar entries with $12<m_\lambda<19$. It excludes sources within a galaxy ellipse enlarged by 5\% relative to the PSF exclusion ellipse, whose semiaxes are $(800,400)$ pixels for NGC~6503 and $(1300,900)$ pixels for M33, at the centers and image angles listed in Section~\ref{sec:geometry}. It also excludes sources whose centroids carry a SEP detection flag, sources with a detected neighbor within three aperture radii, catalog magnitude errors at or above 0.05 mag (0.10 mag for NGC~6503 $i'$), and instrumental flux measurements with uncertainties exceeding 10\%. Foreground stars are kept available as standards at this stage.
+
+The analysis then performs aperture photometry on these stars, where the size of each aperture depends on the empirical PSF measurements from the previous section (Section~\ref{sec:psf}). The analysis subtracts the local sky background from a surrounding annulus spanning 1.5 to 2.5 times the chosen aperture radius. It uses the fractional-area-weighted sky mean after up to four $3\sigma_{\rm MAD}$ clipping rounds and requires at least 30 effective sky pixels and 99.5\% valid source-aperture area. Dividing the measured aperture flux by the estimated enclosed fraction yields the total stellar rate $F_\lambda$ in ADU~s$^{-1}$. The instrumental magnitude follows as
+\begin{equation}
+    m_{\mathrm{inst},\lambda}=-2.5\log_{10}F_\lambda.
+    \label{eq:inst-mag}
+\end{equation}
+To account for correlations induced by registration and local sky subtraction, I repeated the same measurement in 80 blank apertures per band, off the galaxy and at least three aperture radii from detected sources. The square of their robust flux scatter divided by the median propagated variance, floored at one, gives the factor by which I inflate the diagonal stellar-aperture variance. The measured factors ranged from 1.54 to 6.50.
+
+After obtaining instrumental and catalog magnitudes for at least eight suitable reference stars in each frame, magnitude calibration demands fitting a relationship between the two. The analysis fits
+\begin{equation}
+    m_{\lambda,\mathrm{catalog}}
+    =m_{\lambda,\mathrm{inst}}+Z_\lambda+C_\lambda(c-c_0),
+    \label{eq:color-cal}
+\end{equation}
+where $Z_\lambda$ is the zero-point magnitude, $C_\lambda$ is a linear color-response coefficient, and $c-c_0$ is the catalog color of the reference star relative to the median color of the pre-clipping sample. The $u'$ fit uses $u-g$, the $g'$ and $r'$ fits use $g-r$, and the $i'$ fit uses $r-i$. The pipeline determines $Z_\lambda$ and $C_\lambda$ through weighted least squares, where the weights account for the instrumental flux uncertainty converted to magnitudes, catalog magnitude uncertainty, and an additional 0.02 mag uncertainty from the aperture correction, added in quadrature. It then iteratively removes stars with residuals exceeding three times the larger of the star's magnitude error and $\sigma_{\rm MAD}$ of the residuals, and refits the relationship for up to eight iterations. A color fit is attempted with at least twenty suitable stars over a nonzero color range and retained when $|C_\lambda|\geq1.5\sigma_{C_\lambda}$. Otherwise the analysis refits just the zero point. The covariance matrix, scaled up by the reduced $\chi^2$ when it exceeds one, quantifies uncertainty in the zero point and color term, which the analysis propagates into the subsequent galaxy photometry.
+
+Unlike a zero-point-only calibration, the inclusion of a color term accounts for differences between the telescope-filter-detector response and the standard Sloan passbands. Even filters nominally corresponding to the same color may have slightly different wavelength-dependent sensitivities. Consequently, two stars with different spectral distributions can require different magnitude corrections. A two-filter calibration can already estimate such a correction using the stars' catalog colors, while the three filters in this analysis permit separate adjacent-color dependencies. The analysis then jointly solves the applicable calibration equations when converting galaxy fluxes into magnitudes, since each nonzero color term depends on the calibrated magnitudes of multiple filters (Section~\ref{sec:photometry}). \citet{methSmith} developed the Sloan standard-star system and corresponding photometric transformations, which use first-order color terms to account for differences between instrumental and standard photometric systems. The linear approximation assumes that these differences are sufficiently small over the relevant range of stellar colors. The fit treats the catalog color as fixed, so its covariance is approximate.
+
+\begin{deluxetable*}{llcccc}[t]
+\tablecaption{Photometric calibration of the stacks\label{tab:zero-points}}
+\tabletypesize{\small}
+\tablewidth{0pt}
+\tablehead{
+\colhead{Galaxy} & \colhead{Band} & \colhead{Standards} &
+\colhead{$Z_\lambda$ (mag)} & \colhead{$C_\lambda$} & \colhead{Residual scatter (mag)}}
+\startdata
+NGC~6503 & $g'$ & 8   & $23.863\pm0.012$ & \nodata & 0.022 \\
+NGC~6503 & $r'$ & 15  & $23.322\pm0.009$ & \nodata & 0.016 \\
+NGC~6503 & $i'$ & 12  & $22.129\pm0.017$ & \nodata & 0.029 \\
+M33 & $u'$      & 40  & $17.973\pm0.025$ & $0.427\pm0.168$ & 0.153 \\
+M33 & $g'$      & 56  & $20.430\pm0.009$ & \nodata & 0.065 \\
+M33 & $r'$      & 336 & $19.837\pm0.003$ & \nodata & 0.064
+\enddata
+\tablecomments{Standards are the stars retained by the final fit on the frames used for radial photometry. Residual scatter is the scaled median absolute deviation. A dash denotes a zero-point-only fit. The quoted uncertainties are formal fit errors. All M33 zero points depend on the inferred passbands, and $u'$ also depends on the replacement flat.}
+\end{deluxetable*}
+
+The only retained color term was for M33 $u'$. Its pivot was $u-g=1.236$ mag, and the central 80\% of the input standards spanned only 0.30 mag in color. The later $u'$ profiles therefore depend especially on how well the linear stellar relation transfers to the galaxy's spectrum. The NGC~6503 bands each had fewer than twenty final standards. Table~\ref{tab:zero-points} gives the resulting fit parameters.
+
+\subsection{Masking interfering light sources}
+\label{sec:masking}
+
+Light from foreground stars and background deep-sky objects can interfere with galactic light. Galaxies are diffuse light sources that can occupy an appreciable area of sky. The outer ellipses used here subtend about 11 and 1,990 square arcminutes on the sky for NGC~6503 and M33, respectively. These are projected analysis areas, $\pi q (sR_{\rm out})^2$, with the disk axis ratio $q$, angular pixel scale $s$, and outer radius $R_{\rm out}$. A galaxy's apparent optical size depends on the adopted isophote or limiting surface brightness. Thus, light from galaxies often approaches Earth from the same direction as light from background galaxies located behind the target or foreground stars in the Milky Way.
+
+To correct for interfering light, the pipeline builds a mask from catalog evidence of foreground stars and background galaxies. It projects Gaia DR3 sources onto the $r'$ image after propagating positions carrying proper motions from their reference epochs to the observation date \citep{methGaia}. A Gaia source qualifies as foreground when its renormalized unit weight error is below 1.4 and either its parallax or its joint two-dimensional proper motion is significant at $5\sigma$. For the latter test, the pipeline takes the square root of $\vec{\mu}^{\mathsf T}\mathbf{C}_{\mu}^{-1}\vec{\mu}$, using Gaia's proper-motion covariance. A catalog extended source qualifies as a background galaxy when SDSS supplies a spectrum classified as \texttt{GALAXY} with $z>0.005$ and \texttt{zWarning}=0. These catalog tests allow masks even where a star is blended with the target in the coadd.
+
+To review additional sources, the pipeline detects objects in $r'$ at $5\sigma$ over at least five connected pixels. Objects less than half the stellar FWHM or with major-to-minor axis ratios greater than four, Gaia objects with uncertain membership, and SDSS extended sources without secure spectra are flagged for review. This criterion protects target H\,\textsc{ii} regions and clusters from automatic masking based on morphology. The pipeline uses the original $r'$ frame for this work. For M33 that is the stack labeled $i'$ at acquisition, while the separate gradient correction applies to the header-$r'$ stack (Section~\ref{sec:m33-background}).
+
+The initial stellar mask radius is $1.5R_{95}$ in $r'$, which gives $6\farcs00$ for NGC~6503 and $20\farcs50$ for M33. Background galaxies are masked with a $10\arcsec$ radius. For the radial masks, on-galaxy groups of at least three otherwise secure sources within $20\arcsec$ of a position are reviewed, retaining those with strong Gaia foreground evidence. For the final M33 science annuli, the pipeline caps the radius for secure Gaia stars at $18\arcsec$, $14\arcsec$, and $11\arcsec$ for $G\geq17$, $18.5$, and $20$, respectively. The fainter stars have less extensive wings and the smaller masks recover disk area. The original radii are used for the sky fits and reference curve of growth. Accepted circular exclusions are unioned and applied on the common grid. The pipeline also evaluates the sensitivity of the annular means to removing the review candidates wherever sufficient pixels would remain (Section~\ref{sec:photometry}). Figure~\ref{fig:masks} shows the adopted source exclusions and the locations used to estimate the sky.
+
+\subsection{Sky background estimation}
+\label{sec:sky}
+
+The analysis fits an additive plane to off-galaxy pixels in each filter for both galaxies. Fitting spatially distributed boxes allows the sky under the galaxy to vary across its extent. In the pre-corrected M33 $g'$ coadd this plane describes the residual sky, including any remaining linear slope. The geometry for the sky exclusion uses the reference centers and angles from Section~\ref{sec:geometry}, with semimajor axes of 1,400 pixels for NGC~6503 and 1,500 pixels for M33. The excluded regions extend beyond the outer science ellipse so that bright disk structure cannot dominate the fit.
+
+To find sky pixels, the pipeline starts with pixels valid in every band and removes the secure source masks. The validity tests require finite intensities and variances, at least 80\% of the maximum input coverage before IQR clipping, and at least two surviving exposures. These cuts limit the loss of exposure depth near edges and allow the temporal scatter to be estimated. The pre-corrected M33 $g'$ frame also carries its right-edge and additional coverage exclusions. Using the $r'$ image and a 128-pixel SEP background mesh, the pipeline finds the segmentation of sources above $5\sigma$ in at least five pixels and expands it by two pixels to reduce contamination by wings. The exclusions in this step select pixels for the fit. The mesh background itself is used to identify sources.
+
+The pipeline divides the remaining field into non-overlapping $64\times64$-pixel boxes and retains those with at least 45\% usable off-galaxy pixels. In each band it computes the mean of the valid pixels after four rounds of $3\sigma_{\rm MAD}$ clipping. It fits a plane of the form of Equation~\ref{eq:bg-plane} using the mean coordinates of the usable pixels in each box, retaining at least 30 boxes after up to eight rounds of $3.5\sigma_{\rm MAD}$ residual clipping. Of 3,280 initially eligible boxes for NGC~6503, the $g',r',i'$ fits retain 3,044, 3,131, and 3,244. The M33 $u',g',r'$ fits retain 796, 632, and 777 of 797. Figure~\ref{fig:masks} shows the retained $r'$ boxes and the exclusion geometry.
+
+\begin{figure*}[t]
+    \plotone{figures/masks_and_sky.pdf}
+    \caption{Masks and sky sampling on the common $r'$ grids. Panels (a) and (c) show the secure source mask in orange, with blue ellipses at $0.5$, $1$, $1.5$, and $2R_e$ and the outer science boundary dashed in white. The science measurements also enforce the detector and coverage masks. Panels (b) and (d) show the full grids, with cyan squares marking the centers of the boxes retained in the $r'$ sky fit. The dashed white ellipse outlines the galaxy exclusion for the sky model. The scales differ between panels.}
+    \label{fig:masks}
+\end{figure*}
+
+I resampled $384\times384$-pixel spatial blocks of boxes in 250 bootstrap trials, using the same block draw in every band so that the covariance includes correlations across filters. The pipeline repeats the fit after enlarging the sky exclusion by 5\% and 15\%. It carries the larger of the change from these alternative masks and the clipped box residual scale as a coherent uncertainty in the sky model. A coherent sky uncertainty persists when many pixels in an annulus are averaged.
+
+\subsection{Geometry of apertures}
+\label{sec:geometry}
+
+Significant galactic inclination forced the analysis to adopt elliptical annuli to denote points roughly equidistant from the center of each galaxy. The adopted inclinations of M33 and NGC~6503 are $54^{\circ}$ and $74^{\circ}$, respectively \citep{methCorbelli,methBottema}. For a thin circular disk, the projected minor-to-major ratio is $q=\cos i$. Writing $(x',y')$ for image offsets from the center rotated into major- and minor-axis coordinates, the projected semimajor radius is
+\begin{equation}
+    a=\sqrt{x'^2+(y'/q)^2}.
+    \label{eq:ellipse}
+\end{equation}
+I fixed the orientation in every band to the observed image major axis. Table~\ref{tab:geometry} gives the projected geometry. The M33 reference center is the image center of the adopted disk ellipses, and for the final science apertures I use the SIMBAD optical nucleus at ICRS $(23.4620691^{\circ},30.6601751^{\circ})$ \citep{methSIMBAD}. The $r'$ nucleus is saturated in all ten raw exposures, so I omit the first M33 science bin inside $0.1R_e$. The reference sky geometry and $R_e$ are held fixed through this science-only change.
+
+\begin{deluxetable*}{lcccccc}[t]
+\tablecaption{Adopted reference aperture geometry\label{tab:geometry}}
+\tabletypesize{\small}
+\tablewidth{0pt}
+\tablehead{
+\colhead{Galaxy} & \colhead{Center $(x,y)$ (pix)} & \colhead{Image angle} &
+\colhead{$q$} & \colhead{$R_{\rm out}$ (pix)} & \colhead{$R_e$ (arcsec)} &
+\colhead{$R_e$ (kpc)}}
+\startdata
+NGC~6503 & $(2150.0,1825.0)$ & $30.58^{\circ}$ & 0.276 & 1100 & $61.6\pm2.2$ & $1.87\pm0.11$ \\
+M33 & $(1655.5,1367.5)$ & $156.8^{\circ}$ & 0.588 & 1100 & $803\pm157$ & $3.27\pm0.66$
+\enddata
+\tablecomments{Positions use zero-based pixels on the common grids. Image angles increase from $+x$ toward $+y$. The M33 science center is $(1647.24,1354.93)$ pixels. The M33 radius includes modeled light in the reference growth curve as described in the text.}
+\end{deluxetable*}
+
+Distances of $6.25\pm0.29$ Mpc for NGC~6503 and $0.84\pm0.04$ Mpc for M33 convert the angular scales to physical units \citep{methSchombert,methFreedman}. For pixel scale $s$ in arcsec per pixel and distance $D$ in Mpc,
+\begin{equation}
+    R\,[\mathrm{kpc}]=\frac{1000Dsa}{206264.806}.
+    \label{eq:physical-scale}
+\end{equation}
+The physical pixel scales are 0.00590 kpc for NGC~6503 and 0.00729 kpc for M33. I set the science annulus width to $0.1R_e$ in each galaxy, or 31.65 and 44.84 reference pixels, and use the same edges in every band. This provides comparable sampling in units of disk size while averaging many pixels in each bin. The final edge is truncated at the outer ellipse when the remaining width exceeds half a bin.
+
+\subsubsection{Half-light radius comparison}
+\label{sec:half-light}
+
+I measure the semimajor radius enclosing half the $r'$ light within the adopted outer ellipse. Using the same reference band for both galaxies makes the radial scale comparable and allows its determination independently of the bluer-band coverage. I first divide the radius into 50 equal rings, use the $r'$ detector mask and the secure source exclusions, and require 50\% coverage in $r'$ alone. I multiply each ring's sky-subtracted mean by its full geometric area, on the assumption that its surviving azimuths represent the full ring. Their cumulative sum is the curve of growth. I linearly interpolate to half the final enclosed rate.
+
+All 50 reference rings pass in NGC~6503. For M33, 35 pass. I estimate the missing M33 rings for the reference radius by fitting an exponential $I(R)=I_0\exp(-R/h)$ to the passing $r'$ rings with positive flux above three times the random-plus-sky error, with the full ring covariance as the fit weight. I integrate that model over the missing rings. Those rings account for 34.1\% of the total M33 reference light. This infill is used only to establish the radial scale. I estimate the radius uncertainty with 250 realizations drawn from the ring covariance, repeating the interpolation and, for M33, the infill. I then add distance uncertainty in quadrature for the values in kpc. The last five reference rings account for 2.3\% and 4.0\% of the enclosed light in NGC~6503 and M33. Both are below the adopted 5\% test for a flattening growth curve (Figure~\ref{fig:reference-growth}). The M33 radius and its error are conditional on the exponential model.
+
+\begin{figure*}[t]
+    \plotone{figures/reference_growth.pdf}
+    \caption{Reference $r'$ curves of growth, scaled by the rate enclosed at the outer ellipse. Dashed lines mark the interpolated half-light radii and shaded bands give the estimated $1\sigma$ errors including the adopted distance uncertainties. The NGC~6503 curve uses measured annular means. The M33 curve includes an exponential estimate for the rings below the reference coverage cut. The final science profiles use the observed common-band pixels.}
+    \label{fig:reference-growth}
+\end{figure*}
+
+We can check that these radii are reasonable by comparing with published red-band disk scale lengths. \citet{methBottema} report an inner scale of $40\arcsec$ for NGC~6503, while \citet{methKent} finds $9.6\arcmin$ for M33 from Gunn $r$ photometry. For an infinite exponential disk the half-light radii corresponding to those scales are $1.678h$, or $67\arcsec$ and $16.1\arcmin$. Integrating the same models only to our outer radii gives about $65\arcsec$ and $14.0\arcmin$, compared with our $61.6\arcsec$ and $13.4\arcmin$. The comparison checks the scale of the apertures. Different passbands, departures from an exponential in the observed inner disks, and M33's missing rings limit a more detailed comparison.
+
+\subsection{Photometry}
+\label{sec:photometry}
+
+The pipeline performs surface photometry on identical admitted pixels in each filter. It sums the sky-subtracted rates in each elliptical annulus with fractional boundary weights from a $5\times5$ subpixel grid. Importantly, we do not consider pixels that were previously masked by our pipeline in Section~\ref{sec:masking} due to foreground or background light interference. We also require that every pixel used pass the detector and exposure-coverage cuts in all three bands. For retained pixel weights $w_p$, count rates $S_{\lambda,p}$, and predicted sky $B_\lambda(x_p,y_p)$, the measured intensity per projected square arcsecond is
+\begin{equation}
+    I_{\lambda,k} =
+    \frac{\sum_{p\in k} w_p\,[S_{\lambda,p}-B_\lambda(x_p,y_p)]}
+         {s^2\sum_{p\in k} w_p}.
+    \label{eq:annular-photometry}
+\end{equation}
+I require the admitted weight in each annulus to cover at least 65\% of its full geometric area for NGC~6503 and 50\% for M33. The lower M33 threshold retains more usable measurements in its crowded field. It also makes the measurements more sensitive to which azimuths are sampled. The pipeline saves this coverage together with the intensity and reports the change in the annular mean when review candidates are additionally excluded.
+
+The uncertainty model carries covariance across annuli and filters. For each annulus it includes the random variance of the weighted mean inflated by the blank-aperture factor, the joint sky-plane covariance projected onto the annulus's weighted mean coordinates, and the coherent sky-model sensitivity. NGC~6503 carries a conservative coherent bound from the shared bias and flat masters. For M33, the pipeline traces the accepted stack weights and bilinear interpolation weights back to the independent native detector pixels. It propagates repeat errors in the bias and flat masters through the derivatives of Equation~\ref{eq:detector-cal}. This preserves covariance where different exposures or annuli reuse the same detector pixel, including between $u'$ and $r'$ through their common $3\times3$ bias. The assumed 1\% sensitivity floor for the replacement $u'$ flat remains a coherent term. For M33 $g'$, the residual sky fit absorbs changes in the earlier additive plane, so the profile uncertainty uses the new sky-plane covariance with the original coadd's random and master uncertainties. The budget is conditional on the adopted sky and illumination models, with the sky and master sensitivity terms propagated coherently.
+
+For positive intensities, I convert $-2.5\log_{10}I_{\lambda,k}$ to calibrated surface brightness by solving Equation~\ref{eq:color-cal} with the colors formed from those same annuli. I use the stellar zero points and color terms to set the photometric scale. The per-star aperture correction only enters the determination of those coefficients. The pipeline propagates uncertainty from the flux covariance and the fitted zero points and color terms together, retaining shared errors between annuli. A color-dependent solution requires the relevant bands and a transformation condition number of at most 100. The pipeline retains instrumental intensities in cases with insufficient calibration.
+
+I report magnitudes as detections only in annuli with sufficient common area and intensity greater than three times the total error in that band. Colors require detections in both bands. For low-significance measurements with adequate area, the saved tables retain the signed intensity and a conservative bound $\max(0,I)+3\sigma_I$ on it. The table and covariance arrays accompany the observed, extinction-corrected, and inclination-corrected profiles. In M33, the final products retain 24 annuli above the area cut, of which 14, 21, and 24 pass the intensity cut in $u',g',r'$. NGC~6503 retains 35 annuli, of which 29, 31, and 26 pass in $g',r',i'$.
+
+\subsection{Extinction corrections}
+\label{sec:extinction}
+
+Extinction by gas and dust in the Milky Way is color-dependent. I correct the galaxy profiles with one foreground reddening per field, estimated from the median of eight equally spaced positions on an off-galaxy circle in the Schlegel, Finkbeiner, and Davis dust map served by IRSA \citep{methSFD}. The sample circles have radii of $0.35^{\circ}$ for NGC~6503 and $1.0^{\circ}$ for M33. Sampling off the galaxy reduces contamination by the target's own far-infrared emission. Using the $R_V=3.1$ coefficients of \citet{methSF} on the original map reddenings gives
+\begin{equation}
+    A_\lambda = k_\lambda E(B-V)_{\rm SFD}.
+    \label{eq:foreground-extinction}
+\end{equation}
+The coefficients are
+\[
+    (k_u,k_g,k_r,k_i)=(4.239,3.303,2.285,1.698).
+\]
+They already include the recalibration of the original reddening scale. I subtract $A_\lambda$ from each surface brightness and subtract $A_{\lambda_1}-A_{\lambda_2}$ from a color. The nominal Sloan coefficients make the M33 extinction correction conditional on the inferred passbands.
+
+\begin{deluxetable*}{lccccc}[t]
+\tablecaption{Milky Way reddening and band extinctions\label{tab:extinction}}
+\tabletypesize{\footnotesize}
+\tablewidth{0pt}
+\tablehead{
+\colhead{Galaxy} & \colhead{$E(B-V)$} & \colhead{$A_u$} & \colhead{$A_g$} &
+\colhead{$A_r$} & \colhead{$A_i$}}
+\startdata
+NGC~6503 & 0.0306 & \nodata & 0.101 & 0.070 & 0.052 \\
+M33 & 0.0532 & 0.226 & 0.176 & 0.122 & \nodata
+\enddata
+\tablecomments{All values are in magnitudes. The assumed uncertainty in $E(B-V)$ is 0.010 mag for both galaxies.}
+\end{deluxetable*}
+
+The uncertainty in foreground reddening is the largest of the spatial $\sigma_{\rm MAD}$ of the eight map values, 16\% of their median, and 0.01 mag. I add an assumed 5\% extinction-coefficient uncertainty in each band. The reddening error is common to every annulus and correlated across bands. The adopted correction covers Milky Way dust. Extinction within the target is part of the observed galaxy signal.
+
+\subsection{Inclination correction}
+\label{sec:inclination}
+
+Inclination makes a transparent thin disk appear brighter per unit projected area by the geometric factor $1/q$. I therefore correct the Milky Way-adjusted surface brightness to face-on values using
+\begin{equation}
+    I_{\rm face}=q I_{\rm proj},
+    \qquad
+    \mu_{\rm face}=\mu_{\rm MW}-2.5\log_{10}q.
+    \label{eq:inclination}
+\end{equation}
+This adds 1.40 mag~arcsec$^{-2}$ to each NGC~6503 band and 0.58 mag~arcsec$^{-2}$ to each M33 band. The common shift cancels in every color difference. The semimajor axes already give the disk-plane radii under the adopted thin-disk geometry. I hold the inclinations fixed and use this as an area correction. Finite disk thickness and internal extinction can still affect the inferred profiles.
+
+The reduction uses \path{project/pipeline_one.ipynb} and the modules beside it. Install the dependencies in \path{project/requirements-pipeline.txt}, set \texttt{MASTERS\_EXIST=False} to build the masters from raw frames, and run the registration, stacking, M33 $g'$ correction, and analysis cells in order. The notebook saves the selection tables, masks, sky fits, and profiles. The figures and the filter and stack diagnostics can be regenerated from the saved products with \path{make_figures.py}.
